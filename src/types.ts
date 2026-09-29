@@ -200,10 +200,56 @@ export interface UserProfile {
   watchlist?: string[];
   watchlistFolders?: Record<string, string[]>;
   metaScalpSettings?: MetaScalpSettings;
+  exchangeApiKeys?: Partial<Record<ExchangeId, ExchangeApiCredentials>>;
   inviteCode?: string;
   createdAt?: string;
   updatedAt?: string;
   chartLabelSettings?: { entry: boolean; target: boolean; stop: boolean };
+}
+
+export interface ExchangeApiCredentials {
+  exchange: ExchangeId;
+  apiKey: string;
+  apiSecret: string;
+  passphrase?: string;
+  marketType: MarketType;
+  isTestnet?: boolean;
+  label?: string;
+  enabled: boolean;
+  lastTestedAt?: number;
+  lastTestStatus?: 'success' | 'error';
+  lastTestMessage?: string;
+}
+
+export type OrderSide = 'BUY' | 'SELL';
+export type OrderType = 'LIMIT' | 'MARKET' | 'STOP_MARKET' | 'STOP' | 'TAKE_PROFIT_MARKET' | 'TAKE_PROFIT';
+
+export interface PlacedOrder {
+  orderId: string;
+  clientOrderId?: string;
+  symbol: string;
+  exchange: ExchangeId;
+  marketType: MarketType;
+  side: OrderSide;
+  type: OrderType;
+  price?: number;
+  stopPrice?: number;
+  origQty: number;
+  executedQty: number;
+  status: 'NEW' | 'PARTIALLY_FILLED' | 'FILLED' | 'CANCELED' | 'REJECTED' | 'EXPIRED';
+  time: number;
+  updateTime?: number;
+}
+
+export interface AccountBalanceInfo {
+  exchange: ExchangeId;
+  marketType: MarketType;
+  totalWalletBalance: number;
+  availableBalance: number;
+  unrealizedPnl: number;
+  marginBalance?: number;
+  currency: string;
+  isTestnet?: boolean;
 }
 
 export interface TelegramConfig {

@@ -248,6 +248,18 @@ export default function App() {
   // Authentication & Profile modals
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(false);
+  const [profileModalTab, setProfileModalTab] = useState<'general' | 'exchange_api'>('general');
+
+  useEffect(() => {
+    const handleOpenProfileModal = (e: any) => {
+      if (e?.detail?.tab) {
+        setProfileModalTab(e.detail.tab);
+      }
+      setIsProfileModalOpen(true);
+    };
+    window.addEventListener('open_user_profile_modal', handleOpenProfileModal);
+    return () => window.removeEventListener('open_user_profile_modal', handleOpenProfileModal);
+  }, []);
 
   // Auto-dismiss Alert toast
   useEffect(() => {
@@ -979,6 +991,7 @@ export default function App() {
       {/* User Profile & Isolated Settings Modal */}
       <UserProfileModal
         isOpen={isProfileModalOpen}
+        initialTab={profileModalTab}
         onClose={() => setIsProfileModalOpen(false)}
         onOpenAlerts={() => handleOpenTelegramAlerts()}
         onOpenArchive={() => setIsArchiveModalOpen(true)}
