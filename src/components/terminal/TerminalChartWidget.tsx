@@ -35,6 +35,7 @@ import {
 } from '../../types';
 import { formatCryptoPrice, formatVolume } from '../../utils/formatters';
 import { ScalperDOMWidget } from './ScalperDOMWidget';
+import { RealtimeFuturesChart } from '../chart/RealtimeFuturesChart';
 
 interface TerminalChartWidgetProps {
   block: TerminalChartBlock;
@@ -106,16 +107,16 @@ export const TerminalChartWidget: React.FC<TerminalChartWidgetProps> = ({
     });
   }, []);
 
-  // DOM height preset: 'md' (600px), 'lg' (780px), 'xl' (950px)
+  // DOM height preset: 'md' (280px), 'lg' (360px), 'xl' (480px)
   // Changes ONLY downward height, while width strictly matches chart width
   const activeDomHeightPreset: 'md' | 'lg' | 'xl' = block.domSettings?.heightPreset || 'lg';
 
   const domHeightPx = useMemo(() => {
     switch (activeDomHeightPreset) {
-      case 'md': return 600;
-      case 'xl': return 950;
+      case 'md': return 280;
+      case 'xl': return 480;
       case 'lg':
-      default: return 780;
+      default: return 360;
     }
   }, [activeDomHeightPreset]);
 
@@ -293,47 +294,6 @@ export const TerminalChartWidget: React.FC<TerminalChartWidgetProps> = ({
     }
     return coin.formations[0];
   }, [coin?.formations, block.formationId]);
-
-  // Construct TradingView Embed URL
-  const tradingViewUrl = useMemo(() => {
-    const cleanSymbol = block.symbol.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-    const isBybit = block.exchange === 'bybit';
-    const isFutures = block.marketType === 'futures';
-
-    let tvPrefix = isBybit ? 'BYBIT' : 'BINANCE';
-    let tvSymbol = isFutures ? `${tvPrefix}:${cleanSymbol}.P` : `${tvPrefix}:${cleanSymbol}`;
-
-    let interval = '15';
-    switch (block.timeframe) {
-      case '1m': interval = '1'; break;
-      case '5m': interval = '5'; break;
-      case '15m': interval = '15'; break;
-      case '1h': interval = '60'; break;
-      case '4h': interval = '240'; break;
-      case '1d': interval = 'D'; break;
-      default: interval = '15';
-    }
-
-    const params = new URLSearchParams({
-      symbol: tvSymbol,
-      interval: interval,
-      theme: 'dark',
-      style: '1',
-      timezone: 'exchange',
-      withdateranges: '0',
-      hide_top_toolbar: '1',
-      hide_side_toolbar: '0',
-      allow_symbol_change: '0',
-      save_image: '0',
-      hide_legend: '1',
-      locale: 'uk',
-      toolbar_bg: '#090d16',
-      gridColor: 'rgba(0,0,0,0)',
-      gridTransparency: '100',
-    });
-
-    return `https://s.tradingview.com/widgetembed/?${params.toString()}`;
-  }, [block.symbol, block.exchange, block.marketType, block.timeframe]);
 
   // Filtered coins for in-place switcher
   const filteredCoins = useMemo(() => {
@@ -813,19 +773,6 @@ export const TerminalChartWidget: React.FC<TerminalChartWidgetProps> = ({
         >
           {/* Actions & Tools */}
           <div className="flex flex-wrap items-center gap-1.5">
-            {/* Drawing Toolbar */}
-            <button
-              onClick={handleToggleToolbar}
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] transition-colors border cursor-pointer ${
-                showDrawingToolbar
-                  ? 'bg-cyan-950/60 text-cyan-300 border-cyan-600/50'
-                  : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-              }`}
-            >
-              {showDrawingToolbar ? <PanelLeftClose className="w-3 h-3" /> : <PanelLeftOpen className="w-3 h-3" />}
-              <span>{showDrawingToolbar ? 'Малювання: увімк' : 'Малювання'}</span>
-            </button>
-
             {/* MetaScalp */}
             {coin && onSendMetaScalp && (
               <button
@@ -942,42 +889,19 @@ export const TerminalChartWidget: React.FC<TerminalChartWidgetProps> = ({
         ) : block.mode === 'combined' ? (
           /* 2. Combined Mode: Chart on Top + Order Book (DOM) directly below it */
           <div className="flex-1 w-full h-full flex flex-col overflow-hidden relative">
-            {/* Top: TradingView Chart */}
-            <div className="flex-1 w-full relative border-b border-slate-800 bg-[#090d16] min-h-[260px] overflow-hidden">
-              <div
-                className={`absolute top-0 h-full transition-[width,left] duration-200 ease-in-out ${
-                  showDrawingToolbar ? 'left-0 w-full' : '-left-[54px] w-[calc(100%+54px)]'
-                }`}
-              >
-                <iframe
-                  key={`tv-${block.symbol}-${block.exchange}-${block.marketType}-${block.timeframe}`}
-                  src={tradingViewUrl}
-                  className="w-full h-full border-0"
-                  title={`${block.symbol} TradingView Chart`}
-                  loading="lazy"
-                  allowFullScreen
-                />
-              </div>
-
-              {/* Quick floating toggle button on the chart itself */}
-              <div className="absolute bottom-2 left-2 z-20 flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={handleToggleToolbar}
-                  className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/85 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-cyan-300 shadow-md backdrop-blur-sm transition-all cursor-pointer group"
-                  title={showDrawingToolbar ? 'Сховати панель інструментів' : 'Показати панель інструментів'}
-                  aria-label={showDrawingToolbar ? 'Сховати панель інструментів' : 'Показати панель інструментів'}
-                >
-                  {showDrawingToolbar ? (
-                    <PanelLeftClose className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" />
-                  ) : (
-                    <PanelLeftOpen className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" />
-                  )}
-                </button>
-              </div>
+            {/* Top: Realtime Futures Chart */}
+            <div className="flex-1 w-full relative border-b border-slate-800 bg-[#090d16] min-h-[200px] overflow-hidden">
+              <RealtimeFuturesChart
+                initialSymbol={block.symbol}
+                initialExchange={block.exchange}
+                initialTimeframe={block.timeframe}
+                height="100%"
+                isFullscreen={false}
+                compact={true}
+              />
             </div>
 
-            {/* Middle Divider Header: Order book title & height presets (600px / 780px / 950px) */}
+            {/* Middle Divider Header: Order book title & height presets (280px / 360px / 480px) */}
             <div className="h-6 px-2.5 bg-slate-950/95 border-b border-slate-800 flex items-center justify-between text-[10px] text-slate-400 shrink-0 select-none">
               <div className="flex items-center gap-1.5 font-semibold text-cyan-300">
                 <Layers className="w-3 h-3 text-cyan-400" />
@@ -986,9 +910,9 @@ export const TerminalChartWidget: React.FC<TerminalChartWidgetProps> = ({
               <div className="flex items-center gap-1 shrink-0">
                 <span className="text-[9px] text-slate-500 mr-0.5">Висота стакану:</span>
                 {[
-                  { id: 'md' as const, label: '600px' },
-                  { id: 'lg' as const, label: '780px' },
-                  { id: 'xl' as const, label: '950px' },
+                  { id: 'md' as const, label: '280px' },
+                  { id: 'lg' as const, label: '360px' },
+                  { id: 'xl' as const, label: '480px' },
                 ].map((item) => (
                   <button
                     key={item.id}
@@ -1043,39 +967,16 @@ export const TerminalChartWidget: React.FC<TerminalChartWidgetProps> = ({
             </div>
           </div>
         ) : (
-          /* 3. TradingView Chart Only */
+          /* 3. Realtime Futures Chart Only */
           <div className="flex-1 w-full h-full relative overflow-hidden bg-[#090d16]">
-            <div
-              className={`absolute top-0 h-full transition-[width,left] duration-200 ease-in-out ${
-                showDrawingToolbar ? 'left-0 w-full' : '-left-[54px] w-[calc(100%+54px)]'
-              }`}
-            >
-              <iframe
-                key={`tv-${block.symbol}-${block.exchange}-${block.marketType}-${block.timeframe}`}
-                src={tradingViewUrl}
-                className="w-full h-full border-0"
-                title={`${block.symbol} TradingView Chart`}
-                loading="lazy"
-                allowFullScreen
-              />
-            </div>
-
-            {/* Quick floating toggle button on the chart itself */}
-            <div className="absolute bottom-2 left-2 z-20 flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={handleToggleToolbar}
-                className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/85 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-cyan-300 shadow-md backdrop-blur-sm transition-all cursor-pointer group"
-                title={showDrawingToolbar ? 'Сховати панель інструментів' : 'Показати панель інструментів'}
-                aria-label={showDrawingToolbar ? 'Сховати панель інструментів' : 'Показати панель інструментів'}
-              >
-                {showDrawingToolbar ? (
-                  <PanelLeftClose className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" />
-                ) : (
-                  <PanelLeftOpen className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" />
-                )}
-              </button>
-            </div>
+            <RealtimeFuturesChart
+              initialSymbol={block.symbol}
+              initialExchange={block.exchange}
+              initialTimeframe={block.timeframe}
+              height="100%"
+              isFullscreen={false}
+              compact={isCompactHeader || blockWidth < 520}
+            />
           </div>
         )}
 

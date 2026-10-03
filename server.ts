@@ -27,6 +27,7 @@ import {
   deleteHistoryItem,
   saveUserTelegram,
   getUserTelegram,
+  createSetupAlertsGroup,
 } from './server/alertService';
 import {
   loadSurveillanceList,
@@ -36,9 +37,14 @@ import {
   startSurveillanceMonitor,
   checkAllUserCoins,
   findSurveillanceCoinById,
+  updateSurveillanceCoinActive,
+  setAllSurveillanceCoinsActive,
 } from './server/surveillanceService';
 import { ExchangeId, MarketType, Timeframe } from './src/types';
 import { cronManager } from './server/cronService';
+import { surveillanceManager } from './server/surveillance/surveillanceManager';
+import { surveillanceReplayEngine } from './server/surveillance/replayEngine';
+import { notificationRouter } from './server/notificationRouter';
 
 async function startServer() {
   const app = express();
@@ -178,12 +184,14 @@ async function startServer() {
     try {
       const exchange = (req.query.exchange as 'all' | ExchangeId) || 'all';
       const marketType = (req.query.marketType as 'all' | MarketType) || 'all';
-      const minVolumeUsd = req.query.minVolume !== undefined ? parseFloat(req.query.minVolume as string) : 0;
+      const minVolumeUsd = req.query.minVolume !== undefined ? parseFloat(req.query.minVolume as string) : 50_000;
+      const maxVolumeUsd = req.query.maxVolume !== undefined ? parseFloat(req.query.maxVolume as string) : 10_000_000_000;
 
       const coins = await fetchMarketCoins({
         exchange,
         marketType,
         minVolumeUsd,
+        maxVolumeUsd,
       });
 
       res.json({
@@ -242,8 +250,10 @@ async function startServer() {
       const symbol = rawSymbol.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
       const timeframe = (req.query.timeframe as Timeframe) || '1h';
       const limit = req.query.limit ? Math.min(Math.max(parseInt(req.query.limit as string, 10) || 500, 10), 1000) : 500;
+      const startTime = req.query.startTime ? parseInt(req.query.startTime as string, 10) : undefined;
+      const endTime = req.query.endTime ? parseInt(req.query.endTime as string, 10) : undefined;
 
-      const klines = await fetchKlines(exchange, market, symbol, timeframe, limit);
+      const klines = await fetchKlines(exchange, market, symbol, timeframe, limit, startTime, endTime);
       res.json({ success: true, symbol, exchange, timeframe, data: klines });
     } catch (err: any) {
       console.error('Error fetching klines:', err);
@@ -367,10 +377,27 @@ async function startServer() {
       const tokenStr = botToken !== undefined && String(botToken).trim() !== '' ? String(botToken).trim() : undefined;
       const chatStr = chatId !== undefined && String(chatId).trim() !== '' ? String(chatId).trim() : undefined;
 
-      if (userId) {
-        saveUserTelegram(String(userId), { botToken: tokenStr, chatId: chatStr });
+      // #5: Strict separation between user-scoped and global/system config:
+      // If a valid userId is supplied, save to isolated user store ONLY.
+      // Do NOT overwrite global system config with user's private credentials!
+      if (userId && String(userId).trim() !== '' && String(userId).trim() !== 'guest') {
+        const uid = String(userId).trim();
+        saveUserTelegram(uid, { botToken: tokenStr, chatId: chatStr });
+        const userCfg = getEffectiveTelegramConfig(uid);
+        const activeToken = userCfg.botToken;
+        const activeChatId = userCfg.chatId;
+        const info = activeToken ? await getTelegramBotInfo(activeToken) : { ok: false };
+
+        return res.json({
+          success: true,
+          isConfigured: Boolean(activeToken && activeChatId),
+          botUsername: info.username,
+          chatId: activeChatId,
+          source: userCfg.source,
+        });
       }
 
+      // Fallback for system / guest configuration:
       saveTelegramConfig({
         botToken: tokenStr,
         chatId: chatStr,
@@ -386,6 +413,7 @@ async function startServer() {
         isConfigured: Boolean(activeToken && activeChatId),
         botUsername: info.username,
         chatId: activeChatId,
+        source: globalCfg.source,
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -396,8 +424,8 @@ async function startServer() {
     try {
       const { botToken, chatId, userId } = req.body;
       const result = await testTelegramConnection(botToken, chatId);
-      if (result.success && userId) {
-        saveUserTelegram(String(userId), { botToken, chatId });
+      if (result.success && userId && String(userId).trim() !== '' && String(userId).trim() !== 'guest') {
+        saveUserTelegram(String(userId).trim(), { botToken, chatId });
       }
       res.json(result);
     } catch (err: any) {
@@ -410,6 +438,47 @@ async function startServer() {
       const { botToken } = req.body;
       const result = await detectChatIdFromUpdates(botToken);
       res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Unified Notification Router Endpoints (#6, #8, #9)
+  app.get('/api/notifications/poll', (req, res) => {
+    try {
+      const userId = (req.query.userId as string) || 'guest';
+      const since = Number(req.query.since) || 0;
+      const notifications = notificationRouter.pollClientNotifications(userId, since);
+      res.json({ success: true, notifications });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/notifications/history', (req, res) => {
+    try {
+      const userId = req.query.userId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const history = notificationRouter.getHistory(userId, limit);
+      res.json({ success: true, history });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/notifications/clear-history', (_req, res) => {
+    try {
+      notificationRouter.clearHistory();
+      res.json({ success: true, message: 'Notification history cleared' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/notifications/reset-cooldowns', (_req, res) => {
+    try {
+      notificationRouter.resetCooldowns();
+      res.json({ success: true, message: 'All cooldowns and deduplication trackers reset' });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -578,6 +647,37 @@ async function startServer() {
     }
   });
 
+  // Atomic 3 Price Alerts group creation (ENTRY, TARGET, STOP) for a setup
+  app.post('/api/alerts/setup-group', (req, res) => {
+    try {
+      const { userId, setup, currentPrice, autoActivate } = req.body;
+      if (!userId || userId === 'guest') {
+        return res.status(401).json({
+          success: false,
+          error: 'Встановлення сповіщень доступне тільки для зареєстрованих користувачів.',
+        });
+      }
+      if (!setup) {
+        return res.status(400).json({ success: false, error: 'Дані сетапу відсутні' });
+      }
+
+      const result = createSetupAlertsGroup(
+        String(userId),
+        setup,
+        currentPrice ? Number(currentPrice) : undefined,
+        autoActivate !== undefined ? Boolean(autoActivate) : true
+      );
+
+      if (!result.success) {
+        return res.status(400).json({ success: false, error: result.error });
+      }
+
+      res.json({ success: true, count: result.alerts?.length || 0, alerts: result.alerts });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   app.delete('/api/alerts/:id', (req, res) => {
     try {
       const userId = (req.query.userId || req.body?.userId) as string | undefined;
@@ -614,11 +714,18 @@ async function startServer() {
   // Surveillance endpoints
   app.get('/api/surveillance', (req, res) => {
     try {
-      const userId = req.query.userId as string | undefined;
-      if (!userId || userId === 'guest') {
-        return res.json({ success: true, data: [] });
+      const requestedId = (req.query.userId as string | undefined)?.trim();
+      const userId = requestedId && requestedId !== '' ? requestedId : 'guest';
+      let list = loadSurveillanceList(userId);
+      // If user just logged in and has no surveillance list yet, inherit guest list if available
+      if (list.length === 0 && userId !== 'guest') {
+        const guestList = loadSurveillanceList('guest');
+        if (guestList.length > 0) {
+          const migrated = guestList.map((c) => ({ ...c, userId }));
+          saveSurveillanceList(userId, migrated);
+          list = migrated;
+        }
       }
-      const list = loadSurveillanceList(userId);
       res.json({ success: true, data: list });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -628,21 +735,27 @@ async function startServer() {
   app.post('/api/surveillance', async (req, res) => {
     try {
       const { symbol, baseAsset, quoteAsset, exchange, marketType, userId, config } = req.body;
-      if (!userId || userId === 'guest') {
-        return res.status(401).json({
-          success: false,
-          error: 'Системний нагляд доступний тільки для зареєстрованих користувачів. Будь ласка, увійдіть.',
-        });
-      }
-      const uid = String(userId).trim();
+      const uid = (userId && String(userId).trim()) || 'guest';
       if (!symbol) {
         return res.status(400).json({ success: false, error: 'Тікер монети не вказано' });
       }
       const cleanSymbol = symbol.toUpperCase().replace('/', '').trim();
       const list = loadSurveillanceList(uid);
 
-      if (list.some((c) => c.symbol === cleanSymbol && c.exchange === (exchange || 'binance'))) {
-        return res.status(400).json({ success: false, error: 'Ця монета вже додана до нагляду' });
+      const existing = list.find((c) => c.symbol === cleanSymbol && c.exchange === (exchange || 'binance'));
+      if (existing) {
+        // Coin already on surveillance: ensure it is active and update config/analysis
+        existing.isActive = true; // Always active upon user add/resume
+        existing.updatedAt = new Date().toISOString();
+        if (config) {
+          existing.config = { ...existing.config, ...config };
+        }
+        const { coin: checked } = await checkCoinSurveillance(existing, true);
+        checked.isActive = true;
+        const idx = list.findIndex((c) => c.id === existing.id);
+        if (idx !== -1) list[idx] = checked;
+        saveSurveillanceList(uid, list);
+        return res.json({ success: true, coin: checked, message: 'Монету активовано для системного нагляду' });
       }
 
       const defaultCfg = getDefaultSurveillanceConfig();
@@ -654,17 +767,18 @@ async function startServer() {
         quoteAsset: quoteAsset || 'USDT',
         exchange: exchange || 'binance',
         marketType: marketType || 'futures',
-        isActive: true,
+        isActive: true, // Always active upon addition until user explicitly pauses or removes
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         config: { ...defaultCfg, ...(config || {}) },
       };
 
       const { coin: checkedCoin } = await checkCoinSurveillance(newCoin, true);
+      checkedCoin.isActive = true;
       list.unshift(checkedCoin);
       saveSurveillanceList(uid, list);
 
-      res.json({ success: true, coin: checkedCoin });
+      res.json({ success: true, coin: checkedCoin, message: 'Монету успішно додано на 24/7 системний нагляд!' });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -681,9 +795,10 @@ async function startServer() {
       }
 
       const coin = found.coin;
+      const nextActive = isActive !== undefined ? Boolean(isActive) : coin.isActive;
       const updatedCoin = {
         ...coin,
-        isActive: isActive !== undefined ? Boolean(isActive) : coin.isActive,
+        isActive: nextActive,
         config: config ? { ...coin.config, ...config } : coin.config,
         updatedAt: new Date().toISOString(),
       };
@@ -691,7 +806,26 @@ async function startServer() {
       found.list[found.index] = updatedCoin;
       saveSurveillanceList(found.userId, found.list);
 
+      // Keep 24/7 worker synced with updated coin config & active state (#4)
+      if (updatedCoin.isActive) {
+        surveillanceManager.startWorkerForCoin(updatedCoin);
+      } else {
+        surveillanceManager.stopWorkerForCoin(updatedCoin.id);
+      }
+
       res.json({ success: true, coin: updatedCoin });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Batch toggle all coins active/paused for user
+  app.post('/api/surveillance/toggle-all', (req, res) => {
+    try {
+      const { userId, isActive } = req.body;
+      const uid = (userId && String(userId).trim()) || 'guest';
+      const updatedList = setAllSurveillanceCoinsActive(uid, Boolean(isActive));
+      res.json({ success: true, data: updatedList });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -709,11 +843,13 @@ async function startServer() {
         const list = loadSurveillanceList(uid);
         const filtered = list.filter((c) => c.id !== id);
         saveSurveillanceList(uid, filtered);
+        surveillanceManager.stopWorkerForCoin(id);
         return res.json({ success: true });
       }
 
       const filtered = found.list.filter((c) => c.id !== id);
       saveSurveillanceList(found.userId, filtered);
+      surveillanceManager.stopWorkerForCoin(id);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -741,11 +877,77 @@ async function startServer() {
         return res.status(404).json({ success: false, error: 'Монету не знайдено' });
       }
 
-      const { coin: updated } = await checkCoinSurveillance(found.coin, Boolean(forceNotify));
+      // #6: Single coin manual check explicitly supports forceNotify if requested by user
+      const { coin: updated } = await checkCoinSurveillance(found.coin, {
+        forceCheck: true,
+        forceNotify: Boolean(forceNotify),
+      });
       found.list[found.index] = updated;
       saveSurveillanceList(found.userId, found.list);
 
       res.json({ success: true, coin: updated });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Granular live worker snapshot (orderbook, trade flow, densities, setups, OI)
+  app.get('/api/surveillance/worker/:id', (req, res) => {
+    try {
+      const { id } = req.params;
+      const snapshot = surveillanceManager.getWorkerSnapshot(id);
+      if (!snapshot) {
+        return res.status(404).json({ success: false, error: 'Worker not found or not active' });
+      }
+      res.json({ success: true, data: snapshot });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Causal historical replay / backtest without look-ahead bias
+  app.post('/api/surveillance/backtest', async (req, res) => {
+    try {
+      const { symbol, exchange, marketType, timeframe } = req.body;
+      const sym = (symbol || 'BTCUSDT').toUpperCase().trim();
+      const ex = exchange || 'binance';
+      const mkt = marketType || 'futures';
+      const tf = timeframe || '15m';
+
+      const klines = await fetchKlines(ex, mkt, sym, tf, 200).catch(() => []);
+      const result = surveillanceReplayEngine.runCausalBacktest(sym, klines, tf);
+      res.json({ success: true, data: result });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Get aggregated surveillance events across all tracked coins for user
+  app.get('/api/surveillance/events', (req, res) => {
+    try {
+      const { userId } = req.query;
+      const uid = typeof userId === 'string' && userId.trim() ? userId.trim() : 'guest';
+      const coins = loadSurveillanceList(uid);
+      const allEvents: any[] = [];
+
+      for (const coin of coins) {
+        if (coin.state?.recentEvents && Array.isArray(coin.state.recentEvents)) {
+          for (const ev of coin.state.recentEvents) {
+            allEvents.push({
+              ...ev,
+              coinId: coin.id,
+              symbol: coin.symbol,
+              baseAsset: coin.baseAsset,
+              quoteAsset: coin.quoteAsset,
+              exchange: coin.exchange,
+              marketType: coin.marketType,
+            });
+          }
+        }
+      }
+
+      allEvents.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      res.json({ success: true, data: allEvents });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }

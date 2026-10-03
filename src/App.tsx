@@ -6,10 +6,12 @@ import { ScreenerTable } from './components/ScreenerTable';
 import { CoinScreenerPage } from './components/CoinScreenerPage';
 import { TerminalPage } from './components/TerminalPage';
 import { SurveillancePage } from './components/SurveillancePage';
+import { ReplayPage } from './components/ReplayPage';
+import { RealtimeFuturesChart } from './components/chart/RealtimeFuturesChart';
 import { FormationDetailsModal } from './components/FormationDetailsModal';
 import { FormationGuideModal } from './components/FormationGuideModal';
 import { WatchlistDrawer } from './components/WatchlistDrawer';
-import { UnifiedLinkingModal } from './components/UnifiedLinkingModal';
+import { MetaScalpModal } from './components/MetaScalpModal';
 import { MetaScalpToast, MetaScalpToastState } from './components/MetaScalpToast';
 import { TelegramAlertsModal } from './components/TelegramAlertsModal';
 import { AuthModal, AuthPromptReason } from './components/AuthModal';
@@ -27,13 +29,7 @@ import {
   saveStoredMetaScalpSettings,
   sendTickerToMetaScalp,
 } from './utils/metaScalpService';
-import {
-  DEFAULT_UNIFIED_LINKING_SETTINGS,
-  getStoredUnifiedLinkingSettings,
-  saveStoredUnifiedLinkingSettings,
-  sendTickerToUnifiedTerminals,
-} from './utils/terminalLinkingService';
-import { ScannedCoin, DetectedFormation, ScreenerFilterState, PriceAlert, ArchivedFormation, ActivePageType, UnifiedLinkingSettings } from './types';
+import { ScannedCoin, DetectedFormation, ScreenerFilterState, PriceAlert, ArchivedFormation, ActivePageType } from './types';
 import { runDirectClientScan, getFallbackScannedCoins } from './utils/directExchangeClient';
 import {
   AlertCircle,
@@ -84,12 +80,21 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
 
   useEffect(() => {
-    setFilters((prev) => ({
-      ...prev,
-      exchange: preferences.defaultExchange,
-      marketType: preferences.defaultMarketType,
-      timeframe: preferences.defaultTimeframe,
-    }));
+    setFilters((prev) => {
+      if (
+        prev.exchange === preferences.defaultExchange &&
+        prev.marketType === preferences.defaultMarketType &&
+        prev.timeframe === preferences.defaultTimeframe
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        exchange: preferences.defaultExchange,
+        marketType: preferences.defaultMarketType,
+        timeframe: preferences.defaultTimeframe,
+      };
+    });
   }, [preferences.defaultExchange, preferences.defaultMarketType, preferences.defaultTimeframe]);
 
   // Auth & Profile
@@ -112,8 +117,16 @@ export default function App() {
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash;
+      if (hash === '#replay') {
+        setActivePage((prev) => (prev === 'replay' ? prev : 'replay'));
+        return;
+      }
+      if (hash === '#chart') {
+        setActivePage((prev) => (prev === 'chart' ? prev : 'chart'));
+        return;
+      }
       if (!user) {
-        setActivePage('screener');
+        setActivePage((prev) => (prev === 'screener' ? prev : 'screener'));
         if (hash && hash !== '#screener' && hash !== '') {
           handleOpenAuthModal('signin', 'general');
           window.location.hash = 'screener';
@@ -121,24 +134,28 @@ export default function App() {
         return;
       }
       if (hash === '#patterns') {
-        setActivePage('patterns');
+        setActivePage((prev) => (prev === 'patterns' ? prev : 'patterns'));
+      } else if (hash === '#chart') {
+        setActivePage((prev) => (prev === 'chart' ? prev : 'chart'));
       } else if (hash === '#terminal') {
-        setActivePage('terminal');
+        setActivePage((prev) => (prev === 'terminal' ? prev : 'terminal'));
       } else if (hash === '#surveillance') {
-        setActivePage('surveillance');
+        setActivePage((prev) => (prev === 'surveillance' ? prev : 'surveillance'));
+      } else if (hash === '#replay') {
+        setActivePage((prev) => (prev === 'replay' ? prev : 'replay'));
       } else {
         // default / root / #screener
-        setActivePage('screener');
+        setActivePage((prev) => (prev === 'screener' ? prev : 'screener'));
       }
     };
 
     handleHashChange();
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
-  }, [user, handleOpenAuthModal]);
+  }, [user?.uid, handleOpenAuthModal]);
 
   const handlePageChange = (page: ActivePageType) => {
-    if (!user && page !== 'screener') {
+    if (!user && page !== 'screener' && page !== 'replay' && page !== 'chart') {
       handleOpenAuthModal('signin', 'general');
       return;
     }
@@ -157,15 +174,21 @@ export default function App() {
   // Synchronize watchlist with current logged-in user profile & user-scoped storage (strictly isolated, guests see 0)
   useEffect(() => {
     if (!user) {
-      setWatchlist([]);
+      setWatchlist((prev) => (prev.length === 0 ? prev : []));
       return;
     }
 
     if (profile?.watchlist && Array.isArray(profile.watchlist)) {
-      setWatchlist(Array.from(new Set(profile.watchlist)));
-      try {
-        localStorage.setItem(`crypto_screener_watchlist_${user.uid}`, JSON.stringify(profile.watchlist));
-      } catch {}
+      setWatchlist((prev) => {
+        const next = Array.from(new Set(profile.watchlist));
+        if (prev.length === next.length && prev.every((item, i) => item === next[i])) {
+          return prev;
+        }
+        try {
+          localStorage.setItem(`crypto_screener_watchlist_${user.uid}`, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
       return;
     }
 
@@ -175,32 +198,49 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          setWatchlist(Array.from(new Set(parsed)));
+          setWatchlist((prev) => {
+            const next = Array.from(new Set(parsed));
+            if (prev.length === next.length && prev.every((item, i) => item === next[i])) {
+              return prev;
+            }
+            return next;
+          });
           return;
         }
       }
     } catch {}
 
-    setWatchlist([]);
+    setWatchlist((prev) => (prev.length === 0 ? prev : []));
   }, [user?.uid, profile?.watchlist]);
 
   useEffect(() => {
     if (!user) {
-      setWatchlistFolders({});
+      setWatchlistFolders((prev) => (Object.keys(prev).length === 0 ? prev : {}));
       return;
     }
 
     const folders = profile?.watchlistFolders;
     if (folders && typeof folders === 'object') {
-      setWatchlistFolders(folders);
+      setWatchlistFolders((prev) => {
+        if (JSON.stringify(prev) === JSON.stringify(folders)) {
+          return prev;
+        }
+        return folders;
+      });
       return;
     }
 
     try {
       const saved = localStorage.getItem(`crypto_screener_watchlist_folders_${user.uid}`);
-      setWatchlistFolders(saved ? JSON.parse(saved) : {});
+      const parsed = saved ? JSON.parse(saved) : {};
+      setWatchlistFolders((prev) => {
+        if (JSON.stringify(prev) === JSON.stringify(parsed)) {
+          return prev;
+        }
+        return parsed;
+      });
     } catch {
-      setWatchlistFolders({});
+      setWatchlistFolders((prev) => (Object.keys(prev).length === 0 ? prev : {}));
     }
   }, [user?.uid, profile?.watchlistFolders]);
 
@@ -211,7 +251,7 @@ export default function App() {
   });
 
   useEffect(() => {
-    setSoundEnabled(preferences.soundAlertsEnabled);
+    setSoundEnabled((prev) => (prev === preferences.soundAlertsEnabled ? prev : preferences.soundAlertsEnabled));
   }, [preferences.soundAlertsEnabled]);
 
   const [selectedPair, setSelectedPair] = useState<{
@@ -223,44 +263,42 @@ export default function App() {
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 
-  // Unified terminal linking state (MetaScalp, Vataga, Tiger - isolated per user)
-  const [unifiedLinkingSettings, setUnifiedLinkingSettings] = useState<UnifiedLinkingSettings>(() =>
-    getStoredUnifiedLinkingSettings(user?.uid)
-  );
-
-  useEffect(() => {
-    if (!user) return;
-    if (profile?.unifiedLinkingSettings) {
-      setUnifiedLinkingSettings(profile.unifiedLinkingSettings);
-      saveStoredUnifiedLinkingSettings(profile.unifiedLinkingSettings, user.uid);
-    } else {
-      const userSettings = getStoredUnifiedLinkingSettings(user.uid);
-      setUnifiedLinkingSettings(userSettings);
-    }
-  }, [user?.uid, profile?.unifiedLinkingSettings]);
-
-  const handleUnifiedLinkingSettingsChange = (newSettings: UnifiedLinkingSettings) => {
-    setUnifiedLinkingSettings(newSettings);
-    if (user) {
-      saveStoredUnifiedLinkingSettings(newSettings, user.uid);
-      updateProfileData({ unifiedLinkingSettings: newSettings }).catch(() => {});
-    }
-  };
-
+  // MetaScalp terminal settings state (isolated per user)
   const [isLinkingModalOpen, setIsLinkingModalOpen] = useState<boolean>(false);
   const [metaScalpToast, setMetaScalpToast] = useState<MetaScalpToastState | null>(null);
-
-  // MetaScalp terminal settings state (isolated per user)
-  const [isMetaScalpModalOpen, setIsMetaScalpModalOpen] = useState<boolean>(false);
   const [metaScalpSettings, setMetaScalpSettings] = useState<MetaScalpSettings>(() => {
     return profile?.metaScalpSettings || getStoredMetaScalpSettings(user?.uid);
   });
 
   useEffect(() => {
     if (profile?.metaScalpSettings) {
-      setMetaScalpSettings(profile.metaScalpSettings);
+      setMetaScalpSettings((prev) => {
+        const next = profile.metaScalpSettings!;
+        if (
+          prev.enabled === next.enabled &&
+          prev.port === next.port &&
+          prev.binding === next.binding &&
+          prev.autoSwitchOnClick === next.autoSwitchOnClick &&
+          prev.soundFeedback === next.soundFeedback
+        ) {
+          return prev;
+        }
+        return next;
+      });
     } else if (user?.uid) {
-      setMetaScalpSettings(getStoredMetaScalpSettings(user.uid));
+      const stored = getStoredMetaScalpSettings(user.uid);
+      setMetaScalpSettings((prev) => {
+        if (
+          prev.enabled === stored.enabled &&
+          prev.port === stored.port &&
+          prev.binding === stored.binding &&
+          prev.autoSwitchOnClick === stored.autoSwitchOnClick &&
+          prev.soundFeedback === stored.soundFeedback
+        ) {
+          return prev;
+        }
+        return stored;
+      });
     }
   }, [user?.uid, profile?.metaScalpSettings]);
 
@@ -347,65 +385,49 @@ export default function App() {
     }
   }, [metaScalpToast]);
 
-  // Send ticker to Unified Terminals (MetaScalp, Vataga, Tiger Trade)
+  // Send ticker to MetaScalp terminal
   const handleSendToMetaScalp = useCallback(
     async (coin: ScannedCoin) => {
       if (!user) {
         handleOpenAuthModal('signin', 'linking');
         return;
       }
-      const activeTerminalKey = unifiedLinkingSettings.activeTarget;
-      const isEnabled = activeTerminalKey === 'all'
-        ? true
-        : unifiedLinkingSettings[activeTerminalKey]?.enabled;
 
-      if (!isEnabled) {
+      if (!metaScalpSettings.enabled) {
         setIsLinkingModalOpen(true);
         return;
       }
 
-      const res = await sendTickerToUnifiedTerminals(
+      const res = await sendTickerToMetaScalp(
         coin.symbol,
         coin.exchange,
         coin.marketType,
-        unifiedLinkingSettings
+        metaScalpSettings
       );
-
-      const targetTitle = activeTerminalKey === 'all'
-        ? 'Всі термінали (3x)'
-        : activeTerminalKey === 'vataga'
-        ? 'Vataga (EasyScalp)'
-        : activeTerminalKey === 'tiger'
-        ? 'TigerTrade'
-        : 'MetaScalp';
-
-      const bindingInfo = activeTerminalKey === 'all'
-        ? 'MS/VT/TG'
-        : unifiedLinkingSettings[activeTerminalKey]?.binding || '1';
 
       if (res.success) {
         setMetaScalpToast({
           id: Date.now(),
           type: 'success',
-          title: `${targetTitle} Оновлено`,
-          ticker: res.primaryTicker,
-          binding: bindingInfo,
-          message: res.summaryMessage,
+          title: 'MetaScalp Оновлено',
+          ticker: res.ticker,
+          binding: res.binding,
+          message: res.message,
         });
       } else {
         setMetaScalpToast({
           id: Date.now(),
           type: 'warning',
-          title: targetTitle,
-          ticker: res.primaryTicker,
-          binding: bindingInfo,
+          title: 'MetaScalp',
+          ticker: res.ticker,
+          binding: res.binding,
           message: res.copiedToClipboard
-            ? `${res.summaryMessage} (Ctrl+V для вставки)`
-            : res.summaryMessage,
+            ? `${res.message} (Тікер скопійовано у буфер: Ctrl+V)`
+            : res.message,
         });
       }
     },
-    [user, unifiedLinkingSettings, handleOpenAuthModal]
+    [user, metaScalpSettings, handleOpenAuthModal]
   );
 
   // Handler when selecting pair for details modal
@@ -417,7 +439,10 @@ export default function App() {
       }
       setSelectedArchivedItem(null);
       setSelectedPair({ coin, formation: formation || coin.formations[0] });
-      if (metaScalpSettings.enabled && metaScalpSettings.autoSwitchOnClick) {
+      const shouldAutoSwitch =
+        metaScalpSettings.enabled && metaScalpSettings.autoSwitchOnClick;
+
+      if (shouldAutoSwitch) {
         handleSendToMetaScalp(coin);
       }
     },
@@ -460,7 +485,10 @@ export default function App() {
         formation: archived.formation,
       });
       setIsArchiveModalOpen(false);
-      if (metaScalpSettings.enabled && metaScalpSettings.autoSwitchOnClick) {
+      const shouldAutoSwitch =
+        metaScalpSettings.enabled && metaScalpSettings.autoSwitchOnClick;
+
+      if (shouldAutoSwitch) {
         handleSendToMetaScalp(matchingCoin);
       }
     },
@@ -567,9 +595,10 @@ export default function App() {
     if (!user) {
       setWatchlist((prev) => {
         const uniquePrev = Array.from(new Set(prev));
-        const next = uniquePrev.includes(symbol)
-          ? uniquePrev.filter((s) => s !== symbol)
-          : [...uniquePrev, symbol];
+        const isAdding = !uniquePrev.includes(symbol);
+        const next = isAdding
+          ? [...uniquePrev, symbol]
+          : uniquePrev.filter((s) => s !== symbol);
         const cleanNext = Array.from(new Set(next));
         try {
           localStorage.setItem('crypto_screener_watchlist_guest', JSON.stringify(cleanNext));
@@ -580,13 +609,43 @@ export default function App() {
     }
     setWatchlist((prev) => {
       const uniquePrev = Array.from(new Set(prev));
-      const next = uniquePrev.includes(symbol)
-        ? uniquePrev.filter((s) => s !== symbol)
-        : [...uniquePrev, symbol];
+      const isAdding = !uniquePrev.includes(symbol);
+      const next = isAdding
+        ? [...uniquePrev, symbol]
+        : uniquePrev.filter((s) => s !== symbol);
       const cleanNext = Array.from(new Set(next));
       try {
         localStorage.setItem(`crypto_screener_watchlist_${user.uid}`, JSON.stringify(cleanNext));
       } catch (e) {}
+
+      setWatchlistFolders((prevFolders) => {
+        const entries = Object.entries(prevFolders);
+        if (entries.length === 0) return prevFolders;
+
+        const nextFolders: Record<string, string[]> = {};
+        if (isAdding) {
+          const alreadyAssigned = entries.some(([_, syms]) => Array.isArray(syms) && syms.includes(symbol));
+          entries.forEach(([name, syms], idx) => {
+            const list = Array.isArray(syms) ? [...syms] : [];
+            if (!alreadyAssigned && idx === 0) {
+              if (!list.includes(symbol)) list.push(symbol);
+            }
+            nextFolders[name] = list;
+          });
+        } else {
+          entries.forEach(([name, syms]) => {
+            nextFolders[name] = Array.isArray(syms) ? syms.filter((s) => s !== symbol) : [];
+          });
+        }
+
+        try {
+          localStorage.setItem(`crypto_screener_watchlist_folders_${user.uid}`, JSON.stringify(nextFolders));
+        } catch {}
+        updateProfileData({ watchlistFolders: nextFolders }).catch(() => {});
+
+        return nextFolders;
+      });
+
       updateProfileData({ watchlist: cleanNext }).catch(() => {});
       return cleanNext;
     });
@@ -744,7 +803,7 @@ export default function App() {
           }
           setIsLinkingModalOpen(true);
         }}
-        unifiedLinkingSettings={unifiedLinkingSettings}
+        metaScalpSettings={metaScalpSettings}
         onOpenTelegramAlerts={() => handleOpenTelegramAlerts()}
         telegramAlertsCount={activeAlertsCount}
         surveillanceCount={surveillanceActiveCount}
@@ -757,7 +816,17 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-[2560px] 3xl:max-w-[3440px] w-full mx-auto px-2 sm:px-4 lg:px-6 2xl:px-8 py-2 sm:py-4 space-y-3 sm:space-y-4">
-        {activePage === 'terminal' ? (
+        {activePage === 'chart' ? (
+          <div className="w-full h-[calc(100vh-160px)] min-h-[380px] max-h-[660px] flex flex-col">
+            <RealtimeFuturesChart
+              initialSymbol="BTCUSDT"
+              initialExchange="binance"
+              initialTimeframe="15m"
+              height="100%"
+              isFullscreen={false}
+            />
+          </div>
+        ) : activePage === 'terminal' ? (
           <TerminalPage
             coins={coins}
             watchlist={watchlist}
@@ -767,6 +836,11 @@ export default function App() {
             onOpenTelegramAlerts={handleOpenTelegramAlerts}
             onOpenFullscreenModal={(coin, formation) => handleSelectPair(coin, formation)}
             onReturnToPatterns={() => handlePageChange('screener')}
+          />
+        ) : activePage === 'replay' ? (
+          <ReplayPage
+            coins={coins}
+            onNavigateToScreener={() => handlePageChange('screener')}
           />
         ) : activePage === 'surveillance' ? (
           <SurveillancePage
@@ -1023,15 +1097,15 @@ export default function App() {
         folders={watchlistFolders}
         onFoldersChange={handleWatchlistFoldersChange}
         onSendMetaScalp={handleSendToMetaScalp}
-        metaScalpBinding={unifiedLinkingSettings.activeTarget === 'all' ? '3x' : unifiedLinkingSettings[unifiedLinkingSettings.activeTarget]?.binding || '1'}
+        metaScalpBinding={metaScalpSettings.binding}
       />
 
-      {/* Unified Terminal Linking Modal (MetaScalp, Vataga, Tiger) */}
-      <UnifiedLinkingModal
+      {/* MetaScalp Terminal Linking Modal */}
+      <MetaScalpModal
         isOpen={isLinkingModalOpen}
         onClose={() => setIsLinkingModalOpen(false)}
-        settings={unifiedLinkingSettings}
-        onSettingsChange={handleUnifiedLinkingSettingsChange}
+        settings={metaScalpSettings}
+        onSettingsChange={handleMetaScalpSettingsChange}
         currentSymbol={selectedPair?.coin.symbol || coins[0]?.symbol || 'BTCUSDT'}
       />
 

@@ -1,20 +1,30 @@
 import fs from 'fs';
 import path from 'path';
 import { PriceAlert, AlertHistoryItem, ExchangeId, MarketType } from '../src/types';
-import { sendTelegramMessage } from './telegramService';
+import {
+  getUserTelegram,
+  saveUserTelegram,
+  loadUserTelegram,
+  getEffectiveTelegramConfig,
+  maskToken,
+} from './telegramService';
+import { notificationRouter } from './notificationRouter';
+import { SetupInstance } from './surveillance/types';
+import { validateSetupAlertsMath } from './surveillance/setupValidation';
 
 const DATA_DIR = path.join(process.cwd(), 'server', 'data');
 const ALERTS_FILE = path.join(DATA_DIR, 'alerts.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'alert_history.json');
-const USER_TELEGRAM_FILE = path.join(DATA_DIR, 'user_telegram.json');
 
-// Ensure directory exists
+// Re-export user telegram methods for backward compatibility
+export { getUserTelegram, saveUserTelegram, loadUserTelegram };
+
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     try {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     } catch (e) {
-      console.error('Failed to create server/data directory:', e);
+      console.error('[AlertService] Failed to create server/data directory:', e);
     }
   }
 }
@@ -35,57 +45,8 @@ let isAlertsLoaded = false;
 let historyCache: AlertHistoryItem[] = [];
 let isHistoryLoaded = false;
 
-interface UserTelegramData {
-  botToken?: string;
-  chatId?: string;
-  updatedAt?: string;
-}
-let userTelegramMap = new Map<string, UserTelegramData>();
-let isUserTelegramLoaded = false;
-
-let monitorInterval: any = null;
-
-// --- User Telegram persistence ---
-export function loadUserTelegram(): Map<string, UserTelegramData> {
-  if (isUserTelegramLoaded) return userTelegramMap;
-  try {
-    ensureDataDir();
-    if (fs.existsSync(USER_TELEGRAM_FILE)) {
-      const raw = fs.readFileSync(USER_TELEGRAM_FILE, 'utf-8');
-      const parsed = JSON.parse(raw);
-      userTelegramMap = new Map(Object.entries(parsed));
-    }
-  } catch (err) {
-    console.error('Failed to read user_telegram.json:', err);
-  }
-  isUserTelegramLoaded = true;
-  return userTelegramMap;
-}
-
-export function saveUserTelegram(userId: string, creds: { botToken?: string; chatId?: string }): void {
-  if (!userId) return;
-  loadUserTelegram();
-  const existing = userTelegramMap.get(userId) || {};
-  const updated: UserTelegramData = {
-    botToken: creds.botToken && creds.botToken.trim() ? creds.botToken.trim() : existing.botToken,
-    chatId: creds.chatId && creds.chatId.trim() ? creds.chatId.trim() : existing.chatId,
-    updatedAt: new Date().toISOString(),
-  };
-  userTelegramMap.set(userId, updated);
-  try {
-    ensureDataDir();
-    const obj = Object.fromEntries(userTelegramMap.entries());
-    fs.writeFileSync(USER_TELEGRAM_FILE, JSON.stringify(obj, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to save user_telegram.json:', err);
-  }
-}
-
-export function getUserTelegram(userId?: string): UserTelegramData | undefined {
-  if (!userId) return undefined;
-  loadUserTelegram();
-  return userTelegramMap.get(userId);
-}
+let monitorInterval: NodeJS.Timeout | null = null;
+let isCheckInFlight = false;
 
 // --- Alerts persistence ---
 export function loadAlerts(): PriceAlert[] {
@@ -99,7 +60,7 @@ export function loadAlerts(): PriceAlert[] {
       alertsCache = [];
     }
   } catch (err) {
-    console.error('Failed to read alerts.json:', err);
+    console.error('[AlertService] Failed to read alerts.json:', err);
     alertsCache = [];
   }
   isAlertsLoaded = true;
@@ -110,10 +71,11 @@ export function saveAlerts(alerts: PriceAlert[]): boolean {
   try {
     ensureDataDir();
     alertsCache = alerts;
+    isAlertsLoaded = true;
     fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2), 'utf-8');
     return true;
   } catch (err) {
-    console.error('Failed to save alerts.json:', err);
+    console.error('[AlertService] Failed to save alerts.json:', err);
     return false;
   }
 }
@@ -130,43 +92,42 @@ export function loadHistory(): AlertHistoryItem[] {
       historyCache = [];
     }
   } catch (err) {
-    console.error('Failed to read alert_history.json:', err);
+    console.error('[AlertService] Failed to read alert_history.json:', err);
     historyCache = [];
   }
   isHistoryLoaded = true;
   return historyCache;
 }
 
-export function saveHistory(items: AlertHistoryItem[]): boolean {
+export function saveHistory(history: AlertHistoryItem[]): boolean {
   try {
     ensureDataDir();
-    historyCache = items;
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(items, null, 2), 'utf-8');
+    historyCache = history;
+    isHistoryLoaded = true;
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf-8');
     return true;
   } catch (err) {
-    console.error('Failed to save alert_history.json:', err);
+    console.error('[AlertService] Failed to save alert_history.json:', err);
     return false;
   }
-}
-
-export function getAlertHistory(userId?: string): AlertHistoryItem[] {
-  if (!userId || userId === 'guest') return [];
-  const all = loadHistory();
-  return all.filter((h) => h.userId === userId);
 }
 
 export function addHistoryItem(item: AlertHistoryItem): void {
   const history = loadHistory();
   history.unshift(item);
-  // Cap history at 500 records to maintain high performance
   if (history.length > 500) {
     history.length = 500;
   }
   saveHistory(history);
 }
 
-export function clearAlertHistory(userId?: string): number {
-  if (!userId || userId === 'guest') return 0;
+export function clearUserHistory(userId?: string): number {
+  if (!userId || userId === 'guest') {
+    const history = loadHistory();
+    const count = history.length;
+    saveHistory([]);
+    return count;
+  }
   const history = loadHistory();
   const remaining = history.filter((h) => h.userId !== userId);
   const clearedCount = history.length - remaining.length;
@@ -174,10 +135,19 @@ export function clearAlertHistory(userId?: string): number {
   return clearedCount;
 }
 
-export function deleteHistoryItem(id: string, userId?: string): boolean {
-  if (!userId || userId === 'guest') return false;
+export function clearAlertHistory(userId?: string): number {
+  return clearUserHistory(userId);
+}
+
+export function getAlertHistory(userId?: string): AlertHistoryItem[] {
   const history = loadHistory();
-  const filtered = history.filter((h) => !(h.id === id && h.userId === userId));
+  if (!userId || userId === 'all') return history;
+  return history.filter((h) => h.userId === userId || h.userId === 'guest');
+}
+
+export function deleteHistoryItem(id: string, userId?: string): boolean {
+  const history = loadHistory();
+  const filtered = history.filter((h) => !(h.id === id && (!userId || h.userId === userId)));
   if (filtered.length !== history.length) {
     saveHistory(filtered);
     return true;
@@ -185,11 +155,40 @@ export function deleteHistoryItem(id: string, userId?: string): boolean {
   return false;
 }
 
-// Get all alerts (strictly filtered by user, never leaked to guests)
+/**
+ * Get all alerts with support for user scoping and system-wide monitoring (#11)
+ * When userId is passed: returns only alerts belonging to that user.
+ * When userId is omitted or 'all': returns all alerts (used by system CRON).
+ */
 export function getAllAlerts(userId?: string): PriceAlert[] {
-  if (!userId || userId === 'guest') return [];
   const all = loadAlerts();
-  return all.filter((a) => a.userId === userId);
+  if (!userId || userId === 'all') {
+    return all;
+  }
+  return all.filter((a) => a.userId === userId || (!a.userId && userId === 'guest'));
+}
+
+/**
+ * Real Alert Statistics (#11)
+ * Returns accurate counts without hardcoded mock values.
+ */
+export function getAlertsStats(userId?: string): {
+  totalAlertsMonitored: number;
+  activeAlertsCount: number;
+  triggeredAlerts: number;
+  failedAlerts: number;
+} {
+  const alerts = getAllAlerts(userId);
+  const activeAlertsCount = alerts.filter((a) => a.isActive && !a.triggered).length;
+  const triggeredAlerts = alerts.filter((a) => a.triggered).length;
+  const failedAlerts = alerts.filter((a) => a.triggerStatus === 'FAILED').length;
+
+  return {
+    totalAlertsMonitored: alerts.length,
+    activeAlertsCount,
+    triggeredAlerts,
+    failedAlerts,
+  };
 }
 
 // Create alert
@@ -198,15 +197,14 @@ export function createAlert(
     id?: string;
     createdAt?: number;
     isActive?: boolean;
-    userId?: string;
     telegramBotToken?: string;
     telegramChatId?: string;
   }
 ): PriceAlert {
   const alerts = loadAlerts();
+  const alertId = data.id || `alert_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const userId = data.userId || 'guest';
 
-  // If credentials provided, cache them for this user
   if (data.telegramBotToken || data.telegramChatId) {
     saveUserTelegram(userId, {
       botToken: data.telegramBotToken,
@@ -214,11 +212,9 @@ export function createAlert(
     });
   }
 
-  const userTg = getUserTelegram(userId);
-  const effectiveBotToken = data.telegramBotToken || userTg?.botToken;
-  const effectiveChatId = data.telegramChatId || userTg?.chatId;
-
-  const alertId = data.id || `alert_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const effectiveTg = getEffectiveTelegramConfig(userId);
+  const effectiveBotToken = data.telegramBotToken || effectiveTg.botToken;
+  const effectiveChatId = data.telegramChatId || effectiveTg.chatId;
 
   const newAlert: PriceAlert = {
     id: alertId,
@@ -234,6 +230,8 @@ export function createAlert(
     createdAt: data.createdAt || Date.now(),
     isActive: data.isActive !== undefined ? data.isActive : true,
     triggered: false,
+    triggerStatus: 'ACTIVE',
+    retryCount: 0,
     telegramBotToken: effectiveBotToken,
     telegramChatId: effectiveChatId,
   };
@@ -248,7 +246,7 @@ export function createAlert(
   return newAlert;
 }
 
-// Create batch of alerts (e.g. 3 levels: Entry, Take-Profit, Stop-Loss)
+// Create batch of alerts
 export function createAlertsBatch(
   userId: string,
   alertsList: Array<
@@ -271,9 +269,9 @@ export function createAlertsBatch(
     });
   }
 
-  const userTg = getUserTelegram(userId);
-  const effectiveBotToken = telegramBotToken || userTg?.botToken;
-  const effectiveChatId = telegramChatId || userTg?.chatId;
+  const effectiveTg = getEffectiveTelegramConfig(userId);
+  const effectiveBotToken = telegramBotToken || effectiveTg.botToken;
+  const effectiveChatId = telegramChatId || effectiveTg.chatId;
 
   const createdAlerts: PriceAlert[] = [];
   let index = 0;
@@ -294,6 +292,8 @@ export function createAlertsBatch(
       createdAt: Date.now() + index,
       isActive: item.isActive !== undefined ? item.isActive : true,
       triggered: false,
+      triggerStatus: 'ACTIVE',
+      retryCount: 0,
       telegramBotToken: item.telegramBotToken || effectiveBotToken,
       telegramChatId: item.telegramChatId || effectiveChatId,
     };
@@ -311,6 +311,119 @@ export function createAlertsBatch(
   return createdAlerts;
 }
 
+// Creates an atomic group of 3 Price Alerts for a setup
+export function createSetupAlertsGroup(
+  userId: string,
+  setup: SetupInstance,
+  currentPrice?: number,
+  autoActivate = true
+): { success: boolean; alerts?: PriceAlert[]; error?: string } {
+  const mathValidation = validateSetupAlertsMath(setup);
+  if (!mathValidation.valid) {
+    return {
+      success: false,
+      error: mathValidation.reason || 'Mathematical validation failed for setup levels',
+    };
+  }
+
+  const { entry, target, stop } = mathValidation;
+  const curPrice = currentPrice || entry;
+
+  const entryCondition =
+    setup.direction === 'LONG'
+      ? curPrice >= entry
+        ? 'lte'
+        : 'gte'
+      : curPrice <= entry
+      ? 'gte'
+      : 'lte';
+
+  const targetCondition = setup.direction === 'LONG' ? 'gte' : 'lte';
+  const stopCondition = setup.direction === 'LONG' ? 'lte' : 'gte';
+
+  const effectiveTg = getEffectiveTelegramConfig(userId);
+  const now = Date.now();
+
+  const alertsToCreate: PriceAlert[] = [
+    {
+      id: `${setup.id}_ENTRY`,
+      userId,
+      setupId: setup.id,
+      setupRole: 'ENTRY',
+      symbol: setup.symbol.toUpperCase().replace('/', '').trim(),
+      exchange: setup.exchange,
+      marketType: setup.marketType,
+      targetPrice: Number(entry),
+      condition: entryCondition,
+      levelType: 'entry',
+      formationName: setup.type,
+      note: `[Setup ${setup.direction}] Точка входу в позицію`,
+      createdAt: now,
+      isActive: autoActivate,
+      triggered: false,
+      triggerStatus: 'ACTIVE',
+      retryCount: 0,
+      telegramBotToken: effectiveTg.botToken,
+      telegramChatId: effectiveTg.chatId,
+    },
+    {
+      id: `${setup.id}_TARGET`,
+      userId,
+      setupId: setup.id,
+      setupRole: 'TARGET',
+      symbol: setup.symbol.toUpperCase().replace('/', '').trim(),
+      exchange: setup.exchange,
+      marketType: setup.marketType,
+      targetPrice: Number(target),
+      condition: targetCondition,
+      levelType: 'target',
+      formationName: setup.type,
+      note: `[Setup ${setup.direction}] Ціль Take-Profit (TP) +${Math.abs(((target - entry) / entry) * 100).toFixed(1)}%`,
+      createdAt: now + 1,
+      isActive: autoActivate,
+      triggered: false,
+      triggerStatus: 'ACTIVE',
+      retryCount: 0,
+      telegramBotToken: effectiveTg.botToken,
+      telegramChatId: effectiveTg.chatId,
+    },
+    {
+      id: `${setup.id}_STOP`,
+      userId,
+      setupId: setup.id,
+      setupRole: 'STOP',
+      symbol: setup.symbol.toUpperCase().replace('/', '').trim(),
+      exchange: setup.exchange,
+      marketType: setup.marketType,
+      targetPrice: Number(stop),
+      condition: stopCondition,
+      levelType: 'stop_loss',
+      formationName: setup.type,
+      note: `[Setup ${setup.direction}] Скасування Stop-Loss (SL) -${Math.abs(((entry - stop) / entry) * 100).toFixed(1)}%`,
+      createdAt: now + 2,
+      isActive: autoActivate,
+      triggered: false,
+      triggerStatus: 'ACTIVE',
+      retryCount: 0,
+      telegramBotToken: effectiveTg.botToken,
+      telegramChatId: effectiveTg.chatId,
+    },
+  ];
+
+  const alerts = loadAlerts();
+  for (const newAlert of alertsToCreate) {
+    const existingIdx = alerts.findIndex((a) => a.id === newAlert.id);
+    if (existingIdx >= 0) {
+      alerts[existingIdx] = newAlert;
+    } else {
+      alerts.unshift(newAlert);
+    }
+  }
+
+  saveAlerts(alerts);
+  return { success: true, alerts: alertsToCreate };
+}
+
 // Sync user alerts batch from client/Firestore with smart merge
 export function syncUserAlerts(
   userId: string,
@@ -326,11 +439,10 @@ export function syncUserAlerts(
   }
 
   const all = loadAlerts();
-  const userTg = getUserTelegram(userId);
-  const effectiveBotToken = telegramBotToken || userTg?.botToken;
-  const effectiveChatId = telegramChatId || userTg?.chatId;
+  const effectiveTg = getEffectiveTelegramConfig(userId);
+  const effectiveBotToken = telegramBotToken || effectiveTg.botToken;
+  const effectiveChatId = telegramChatId || effectiveTg.chatId;
 
-  // Map of existing alerts on server for this user
   const existingUserAlerts = new Map<string, PriceAlert>();
   for (const a of all) {
     if (a.userId === userId) {
@@ -338,7 +450,6 @@ export function syncUserAlerts(
     }
   }
 
-  // Merge incoming alerts
   const mergedUserAlerts: PriceAlert[] = [];
   const processedIds = new Set<string>();
 
@@ -346,14 +457,13 @@ export function syncUserAlerts(
     processedIds.add(incoming.id);
     const existing = existingUserAlerts.get(incoming.id);
 
-    // CRITICAL: If the alert already triggered on server while user was offline,
-    // preserve the triggered status and timestamps so it is never overwritten!
     if (existing && existing.triggered) {
       mergedUserAlerts.push({
         ...incoming,
         userId,
         isActive: false,
         triggered: true,
+        triggerStatus: 'TRIGGERED',
         triggeredAt: existing.triggeredAt,
         triggeredPrice: existing.triggeredPrice,
         telegramBotToken: effectiveBotToken || incoming.telegramBotToken || existing.telegramBotToken,
@@ -369,8 +479,6 @@ export function syncUserAlerts(
     }
   }
 
-  // Only preserve alerts on server if they were triggered while the user was offline,
-  // so the triggered event is never lost. Any untriggered alerts removed by the user stay deleted!
   for (const [id, existing] of existingUserAlerts.entries()) {
     if (!processedIds.has(id) && existing.triggered) {
       mergedUserAlerts.push({
@@ -394,12 +502,11 @@ export function deleteAlert(id: string, userId?: string): boolean {
   const initialCount = alerts.length;
   const filtered = alerts.filter((a) => {
     if (a.id === id) {
-      // If a userId is specified, ensure it belongs to this user or is unassigned
       if (!userId || !a.userId || a.userId === 'guest' || a.userId === userId) {
-        return false; // Remove
+        return false;
       }
     }
-    return true; // Keep
+    return true;
   });
 
   if (filtered.length !== initialCount) {
@@ -415,9 +522,12 @@ export function toggleAlert(id: string, userId?: string): PriceAlert | null {
   const alert = alerts.find((a) => a.id === id && (!userId || !a.userId || a.userId === userId));
   if (alert) {
     alert.isActive = !alert.isActive;
-    // If reactivating a triggered alert, reset triggered status
     if (alert.isActive && alert.triggered) {
       alert.triggered = false;
+      alert.triggerStatus = 'ACTIVE';
+      alert.retryCount = 0;
+      alert.nextRetryAt = undefined;
+      alert.lastError = undefined;
       alert.triggeredAt = undefined;
       alert.triggeredPrice = undefined;
     }
@@ -432,7 +542,7 @@ export function clearTriggeredAlerts(userId?: string): number {
   const alerts = loadAlerts();
   const remaining = alerts.filter((a) => {
     if (!a.triggered) return true;
-    if (userId && a.userId && a.userId !== userId) return true; // keep triggered alerts of other users
+    if (userId && a.userId && a.userId !== userId) return true;
     return false;
   });
   const clearedCount = alerts.length - remaining.length;
@@ -440,7 +550,6 @@ export function clearTriggeredAlerts(userId?: string): number {
   return clearedCount;
 }
 
-// HTML escaping helper for Telegram
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')
@@ -448,11 +557,10 @@ function escapeHtml(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
-// Fetch single ticker price from exchange with robust cross-exchange fallbacks
 async function fetchCurrentPrice(exchange: ExchangeId, market: MarketType, symbol: string): Promise<number | null> {
   const cleanSymbol = symbol.toUpperCase().replace('/', '').trim();
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept': 'application/json',
   };
 
@@ -461,12 +569,10 @@ async function fetchCurrentPrice(exchange: ExchangeId, market: MarketType, symbo
         `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${cleanSymbol}`,
         `https://data-api.binance.vision/api/v3/ticker/price?symbol=${cleanSymbol}`,
         `https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`,
-        `https://api1.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`,
       ]
     : [
         `https://data-api.binance.vision/api/v3/ticker/price?symbol=${cleanSymbol}`,
         `https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`,
-        `https://api1.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`,
       ];
 
   const bybitCategory = market === 'futures' ? 'linear' : 'spot';
@@ -475,203 +581,249 @@ async function fetchCurrentPrice(exchange: ExchangeId, market: MarketType, symbo
     `https://api.bytick.com/v5/market/tickers?category=${bybitCategory}&symbol=${cleanSymbol}`,
   ];
 
-  if (exchange === 'binance') {
-    for (const url of binanceMirrors) {
-      try {
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(3500) });
-        if (res.ok) {
-          const data = await res.json();
-          const p = parseFloat(data.price);
-          if (!isNaN(p) && p > 0) return p;
-        }
-      } catch {}
-    }
-    // Fallback to Bybit
-    for (const url of bybitMirrors) {
-      try {
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(3000) });
-        if (res.ok) {
-          const data = await res.json();
-          const list = data?.result?.list;
-          if (Array.isArray(list) && list.length > 0 && list[0].lastPrice) {
-            const p = parseFloat(list[0].lastPrice);
-            if (!isNaN(p) && p > 0) return p;
-          }
-        }
-      } catch {}
-    }
-  } else {
-    // Bybit primary
-    for (const url of bybitMirrors) {
-      try {
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(3500) });
-        if (res.ok) {
-          const data = await res.json();
-          const list = data?.result?.list;
-          if (Array.isArray(list) && list.length > 0 && list[0].lastPrice) {
-            const p = parseFloat(list[0].lastPrice);
-            if (!isNaN(p) && p > 0) return p;
-          }
-        }
-      } catch {}
-    }
-    // Fallback to Binance
-    for (const url of binanceMirrors) {
-      try {
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(3000) });
-        if (res.ok) {
-          const data = await res.json();
-          const p = parseFloat(data.price);
-          if (!isNaN(p) && p > 0) return p;
-        }
-      } catch {}
-    }
+  const primaryMirrors = exchange === 'binance' ? binanceMirrors : bybitMirrors;
+  const secondaryMirrors = exchange === 'binance' ? bybitMirrors : binanceMirrors;
+
+  for (const url of primaryMirrors) {
+    try {
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(3500) });
+      if (res.ok) {
+        const data = await res.json();
+        const p = parseFloat(data.price || data?.result?.list?.[0]?.lastPrice);
+        if (!isNaN(p) && p > 0) return p;
+      }
+    } catch {}
+  }
+
+  for (const url of secondaryMirrors) {
+    try {
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        const data = await res.json();
+        const p = parseFloat(data.price || data?.result?.list?.[0]?.lastPrice);
+        if (!isNaN(p) && p > 0) return p;
+      }
+    } catch {}
   }
 
   return null;
 }
 
-// Check active alerts against live prices
+/**
+ * Check active alerts against live prices with proper State Machine (#3 & #12)
+ *
+ * State Transition:
+ * ACTIVE
+ *  -> TRIGGERING (when condition met)
+ *  -> NOTIFIED/TRIGGERED (when dispatch succeeds)
+ *  -> RETRY (when transient failure occurs, up to max retries with backoff)
+ *  -> FAILED (when terminal error occurs or max retries exceeded)
+ */
 export async function checkAlertsOnce() {
-  const alerts = loadAlerts();
-  const activeAlerts = alerts.filter((a) => a.isActive && !a.triggered);
-  if (activeAlerts.length === 0) return;
+  if (isCheckInFlight) return;
+  isCheckInFlight = true;
 
-  // Group by unique (exchange, market, symbol)
-  const uniqueKeys = new Map<string, { exchange: ExchangeId; market: MarketType; symbol: string }>();
-  for (const a of activeAlerts) {
-    const key = `${a.exchange}:${a.marketType}:${a.symbol}`;
-    if (!uniqueKeys.has(key)) {
-      uniqueKeys.set(key, { exchange: a.exchange, market: a.marketType, symbol: a.symbol });
-    }
-  }
+  try {
+    const alerts = loadAlerts();
+    const now = Date.now();
+    const activeAlerts = alerts.filter(
+      (a) =>
+        a.isActive &&
+        !a.triggered &&
+        a.triggerStatus !== 'TRIGGERING' &&
+        (!a.nextRetryAt || now >= a.nextRetryAt)
+    );
+    if (activeAlerts.length === 0) return;
 
-  // Fetch prices in parallel
-  const priceMap = new Map<string, number>();
-  await Promise.all(
-    Array.from(uniqueKeys.entries()).map(async ([key, item]) => {
-      const p = await fetchCurrentPrice(item.exchange, item.market, item.symbol);
-      if (p !== null && !isNaN(p)) {
-        priceMap.set(key, p);
+    // Group unique pairs
+    const uniqueKeys = new Map<string, { exchange: ExchangeId; market: MarketType; symbol: string }>();
+    for (const a of activeAlerts) {
+      const key = `${a.exchange}:${a.marketType}:${a.symbol}`;
+      if (!uniqueKeys.has(key)) {
+        uniqueKeys.set(key, { exchange: a.exchange, market: a.marketType, symbol: a.symbol });
       }
-    })
-  );
-
-  let updated = false;
-
-  for (const alert of activeAlerts) {
-    const key = `${alert.exchange}:${alert.marketType}:${alert.symbol}`;
-    const currentPrice = priceMap.get(key);
-    if (currentPrice === undefined) continue;
-
-    let isTriggered = false;
-    if (alert.condition === 'gte' && currentPrice >= alert.targetPrice) {
-      isTriggered = true;
-    } else if (alert.condition === 'lte' && currentPrice <= alert.targetPrice) {
-      isTriggered = true;
     }
 
-    if (isTriggered) {
-      alert.triggered = true;
-      alert.isActive = false;
-      alert.triggeredAt = Date.now();
-      alert.triggeredPrice = currentPrice;
-      updated = true;
-
-      console.log(`[ALERT TRIGGERED] ${alert.symbol} target: ${alert.targetPrice}, live price: ${currentPrice}, condition: ${alert.condition}`);
-
-      // Construct rich Telegram message in Ukrainian with HTML escaping
-      const timeStr = new Date(alert.triggeredAt).toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kyiv' });
-      const dateStr = new Date(alert.triggeredAt).toLocaleDateString('uk-UA', { timeZone: 'Europe/Kyiv' });
-
-      let levelTitle = 'Цільовий рівень';
-      if (alert.levelType === 'entry') levelTitle = 'Рівень входу';
-      else if (alert.levelType === 'target') levelTitle = 'Тейк-профіт (Ціль)';
-      else if (alert.levelType === 'stop_loss') levelTitle = 'Стоп-лосс';
-
-      const conditionLabel = alert.condition === 'gte'
-        ? 'Ціна піднялась або досягла рівня (≥)'
-        : 'Ціна опустилась або досягла рівня (≤)';
-
-      const safeSymbol = escapeHtml(alert.symbol);
-      const safeFormation = alert.formationName ? escapeHtml(alert.formationName) : '';
-      const safeNote = alert.note ? escapeHtml(alert.note) : '';
-
-      const message = `🚨 <b>SIGNALHOOK: СПОВІЩЕННЯ ЦІНИ!</b>\n\n` +
-        `🪙 <b>${safeSymbol}</b> (${alert.exchange.toUpperCase()} ${alert.marketType.toUpperCase()})\n` +
-        `💵 <b>Поточна ціна:</b> $${formatPrice(currentPrice)}\n` +
-        `🎯 <b>Ціль сповіщення:</b> $${formatPrice(alert.targetPrice)}\n` +
-        `📊 <b>Умова:</b> ${conditionLabel}\n` +
-        (safeFormation ? `📈 <b>Формація:</b> ${safeFormation}\n` : '') +
-        (alert.levelType ? `🏷 <b>Рівень:</b> ${levelTitle}\n` : '') +
-        (safeNote ? `📝 <b>Коментар:</b> ${safeNote}\n` : '') +
-        `\n⏰ <i>Час спрацювання: ${dateStr} ${timeStr} (Київ)</i>`;
-
-      // Determine effective telegram botToken and chatId
-      const userTg = getUserTelegram(alert.userId);
-      const effectiveBotToken = alert.telegramBotToken || userTg?.botToken;
-      const effectiveChatId = alert.telegramChatId || userTg?.chatId;
-
-      let telegramSent = false;
-      let telegramError: string | undefined = undefined;
-
-      try {
-        const sendRes = await sendTelegramMessage(message, {
-          botToken: effectiveBotToken,
-          chatId: effectiveChatId,
-        });
-        if (sendRes.success) {
-          telegramSent = true;
-          console.log(`[ALERT DISPATCHED] Successfully sent Telegram alert for ${alert.symbol} to user: ${alert.userId || 'default'}`);
-        } else {
-          telegramError = sendRes.error;
-          console.warn(`[ALERT DISPATCH WARNING] Telegram notification for ${alert.symbol} was not delivered:`, sendRes.error);
+    // Fetch prices in parallel
+    const priceMap = new Map<string, number>();
+    await Promise.all(
+      Array.from(uniqueKeys.entries()).map(async ([key, item]) => {
+        const p = await fetchCurrentPrice(item.exchange, item.market, item.symbol);
+        if (p !== null && !isNaN(p)) {
+          priceMap.set(key, p);
         }
-      } catch (dispatchErr: any) {
-        telegramError = dispatchErr?.message || 'Помилка надсилання';
-        console.error(`[ALERT DISPATCH ERROR] Failed to send Telegram alert for ${alert.symbol}:`, dispatchErr);
+      })
+    );
+
+    let updated = false;
+
+    for (const alert of activeAlerts) {
+      const key = `${alert.exchange}:${alert.marketType}:${alert.symbol}`;
+      const currentPrice = priceMap.get(key);
+      if (currentPrice === undefined) continue;
+
+      let isTriggered = false;
+      if (alert.condition === 'gte' && currentPrice >= alert.targetPrice) {
+        isTriggered = true;
+      } else if (alert.condition === 'lte' && currentPrice <= alert.targetPrice) {
+        isTriggered = true;
       }
 
-      // Record in Alert History
-      const historyItem: AlertHistoryItem = {
-        id: `hist_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
-        userId: alert.userId || 'guest',
-        alertId: alert.id,
-        symbol: alert.symbol,
-        exchange: alert.exchange,
-        marketType: alert.marketType,
-        condition: alert.condition,
-        targetPrice: alert.targetPrice,
-        triggeredPrice: currentPrice,
-        formationName: alert.formationName,
-        levelType: alert.levelType,
-        note: alert.note,
-        triggeredAt: alert.triggeredAt,
-        telegramSent,
-        telegramError,
-        createdAt: new Date().toISOString(),
-      };
-      addHistoryItem(historyItem);
-    }
-  }
+      if (isTriggered) {
+        // Step 1: Transition to TRIGGERING (Do NOT mark triggered yet! #3)
+        alert.triggerStatus = 'TRIGGERING';
+        alert.lastAttemptAt = Date.now();
+        updated = true;
 
-  if (updated) {
-    saveAlerts(alerts);
+        console.log(`[AlertService] 🎯 Price crossed level for #${alert.symbol}: target $${alert.targetPrice}, live $${currentPrice} (${alert.condition})`);
+
+        const timeStr = new Date().toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kyiv' });
+        const dateStr = new Date().toLocaleDateString('uk-UA', { timeZone: 'Europe/Kyiv' });
+
+        let levelTitle = 'Цільовий рівень';
+        if (alert.levelType === 'entry') levelTitle = 'Рівень входу';
+        else if (alert.levelType === 'target') levelTitle = 'Тейк-профіт (Ціль)';
+        else if (alert.levelType === 'stop_loss') levelTitle = 'Стоп-лосс';
+
+        const conditionLabel = alert.condition === 'gte'
+          ? 'Ціна піднялась або досягла рівня (≥)'
+          : 'Ціна опустилась або досягла рівня (≤)';
+
+        const safeSymbol = escapeHtml(alert.symbol);
+        const safeFormation = alert.formationName ? escapeHtml(alert.formationName) : '';
+        const safeNote = alert.note ? escapeHtml(alert.note) : '';
+
+        const telegramHtml = `🚨 <b>SIGNALHOOK: СПОВІЩЕННЯ ЦІНИ!</b>\n\n` +
+          `🪙 <b>${safeSymbol}</b> (${alert.exchange.toUpperCase()} ${alert.marketType.toUpperCase()})\n` +
+          `💵 <b>Поточна ціна:</b> $${formatPrice(currentPrice)}\n` +
+          `🎯 <b>Ціль сповіщення:</b> $${formatPrice(alert.targetPrice)}\n` +
+          `📊 <b>Умова:</b> ${conditionLabel}\n` +
+          (safeFormation ? `📈 <b>Формація:</b> ${safeFormation}\n` : '') +
+          (alert.levelType ? `🏷 <b>Рівень:</b> ${levelTitle}\n` : '') +
+          (safeNote ? `📝 <b>Коментар:</b> ${safeNote}\n` : '') +
+          `\n⏰ <i>Час спрацювання: ${dateStr} ${timeStr} (Київ)</i>`;
+
+        // Step 2: Route through unified NotificationRouter (#6 & #8)
+        const dispatchResult = await notificationRouter.dispatch({
+          source: 'PRICE_ALERT',
+          userId: alert.userId,
+          symbol: alert.symbol,
+          exchange: alert.exchange,
+          marketType: alert.marketType,
+          eventType: 'PRICE_ALERT',
+          eventIdentity: alert.id,
+          price: currentPrice,
+          title: `Цінове сповіщення: ${alert.symbol}`,
+          description: `Ціль $${formatPrice(alert.targetPrice)} досягнута! Поточна ціна: $${formatPrice(currentPrice)}`,
+          telegramHtml,
+          channels: ['telegram', 'browser', 'internal'],
+          metadata: {
+            alertId: alert.id,
+            targetPrice: alert.targetPrice,
+            condition: alert.condition,
+            levelType: alert.levelType,
+            formationName: alert.formationName,
+          },
+        });
+
+        // Step 3: Evaluate State Transition based on actual delivery result (#3)
+        if (dispatchResult.success) {
+          // Successfully processed: mark final TRIGGERED state
+          alert.triggered = true;
+          alert.isActive = false;
+          alert.triggerStatus = 'TRIGGERED';
+          alert.triggeredAt = Date.now();
+          alert.triggeredPrice = currentPrice;
+          alert.lastError = undefined;
+
+          // Record in Alert History
+          addHistoryItem({
+            id: `hist_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+            userId: alert.userId || 'guest',
+            alertId: alert.id,
+            symbol: alert.symbol,
+            exchange: alert.exchange,
+            marketType: alert.marketType,
+            condition: alert.condition,
+            targetPrice: alert.targetPrice,
+            triggeredPrice: currentPrice,
+            formationName: alert.formationName,
+            levelType: alert.levelType,
+            note: alert.note,
+            triggeredAt: alert.triggeredAt,
+            telegramSent: Boolean(dispatchResult.channels.telegram?.sent),
+            telegramError: dispatchResult.channels.telegram?.error,
+            telegramStatus: dispatchResult.channels.telegram?.sent
+              ? 'sent'
+              : dispatchResult.channels.telegram?.skipped
+              ? 'not_configured'
+              : 'failed',
+            createdAt: new Date().toISOString(),
+          });
+        } else {
+          // Notification failed
+          const err = dispatchResult.error || 'Помилка надсилання сповіщення';
+          const isTerminal = notificationRouter.isTerminalTelegramError(err);
+          const currentRetries = (alert.retryCount || 0) + 1;
+          alert.retryCount = currentRetries;
+          alert.lastError = err;
+
+          if (isTerminal || currentRetries >= 5) {
+            // Permanent failure: deactivate alert, do not loop forever (#12)
+            alert.isActive = false;
+            alert.triggerStatus = 'FAILED';
+            console.warn(`[AlertService] ❌ Alert #${alert.id} permanently failed (terminal: ${isTerminal}, retries: ${currentRetries}): ${err}`);
+
+            addHistoryItem({
+              id: `hist_fail_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+              userId: alert.userId || 'guest',
+              alertId: alert.id,
+              symbol: alert.symbol,
+              exchange: alert.exchange,
+              marketType: alert.marketType,
+              condition: alert.condition,
+              targetPrice: alert.targetPrice,
+              triggeredPrice: currentPrice,
+              formationName: alert.formationName,
+              levelType: alert.levelType,
+              note: alert.note,
+              triggeredAt: Date.now(),
+              telegramSent: false,
+              telegramError: err,
+              telegramStatus: 'failed',
+              createdAt: new Date().toISOString(),
+            });
+          } else {
+            // Transient failure: enter RETRY state with exponential backoff (#3 & #12)
+            alert.triggerStatus = 'RETRY';
+            const backoffMs = Math.min(currentRetries * 30000, 300000);
+            alert.nextRetryAt = Date.now() + backoffMs;
+            console.log(`[AlertService] ⏳ Alert #${alert.id} transient failure, retry in ${backoffMs / 1000}s (attempt ${currentRetries}/5): ${err}`);
+          }
+        }
+      }
+    }
+
+    if (updated) {
+      saveAlerts(alerts);
+    }
+  } finally {
+    isCheckInFlight = false;
   }
 }
 
 // Start background monitor loop
-export function startAlertMonitor(intervalMs: number = 6000) {
+export function startAlertMonitor(intervalMs = 5000) {
   if (monitorInterval) return;
   loadAlerts();
   loadHistory();
   loadUserTelegram();
   monitorInterval = setInterval(() => {
     checkAlertsOnce().catch((err) => {
-      console.error('Error during alert check iteration:', err);
+      console.error('[AlertService] Error during alert check iteration:', err);
     });
   }, intervalMs);
-  console.log(`Telegram price alert monitor started (interval: ${intervalMs}ms)`);
+  console.log(`[AlertService] Unified price alert monitor started (interval: ${intervalMs}ms)`);
 }
 
 // Stop monitor

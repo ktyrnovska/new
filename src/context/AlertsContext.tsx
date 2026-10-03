@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import {
   collection,
   doc,
@@ -61,6 +61,17 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return 'default';
   });
 
+  const alertsRef = useRef(alerts);
+  alertsRef.current = alerts;
+  const userRef = useRef(user);
+  userRef.current = user;
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
+
+  // Track seen notification records to prevent duplicate popups (#7 & #8)
+  const seenNotificationIdsRef = useRef<Set<string>>(new Set());
+  const lastPollTimeRef = useRef<number>(Date.now() - 60000);
+
   const requestNotificationPermission = useCallback(async (): Promise<NotificationPermission> => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
       try {
@@ -74,35 +85,90 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return 'denied';
   }, []);
 
-  const handleServerAlertTriggered = useCallback((serverAlert: PriceAlert) => {
+  /**
+   * Unified Frontend Event Dispatcher & Browser Notification Handler (#8 & #9)
+   * Dispatches to:
+   * 1. Window Event Bus ('signalhook:notification' & 'signalhook:alert-triggered')
+   * 2. Audio Chime (playAlertChime)
+   * 3. Native Browser Notification with deduplication tag and click-to-focus
+   */
+  const handleUnifiedNotification = useCallback((record: any) => {
+    if (!record) return;
     playAlertChime();
 
     if (typeof window !== 'undefined') {
+      // 1. Dispatch unified event bus
       window.dispatchEvent(
-        new CustomEvent('signalhook:alert-triggered', {
-          detail: {
-            symbol: serverAlert.symbol,
-            targetPrice: serverAlert.targetPrice,
-            condition: serverAlert.condition,
-            triggeredPrice: serverAlert.triggeredPrice,
-            message: serverAlert.note || serverAlert.formationName || 'Цільову ціну досягнуто!',
-          },
+        new CustomEvent('signalhook:notification', {
+          detail: record,
         })
       );
 
+      // Backward compatibility event for Price Alerts
+      if (record.source === 'PRICE_ALERT' || record.eventType === 'PRICE_ALERT') {
+        window.dispatchEvent(
+          new CustomEvent('signalhook:alert-triggered', {
+            detail: {
+              symbol: record.symbol,
+              targetPrice: record.metadata?.targetPrice || record.price,
+              condition: record.metadata?.condition,
+              triggeredPrice: record.price,
+              message: record.description || record.title,
+            },
+          })
+        );
+      }
+
+      // 2. Native Browser Notification (#8)
       if ('Notification' in window && Notification.permission === 'granted') {
         try {
-          const conditionSign = serverAlert.condition === 'gte' ? '≥' : '≤';
-          new Notification(`🚨 SIGNALHOOK: ${serverAlert.symbol}`, {
-            body: `Ціна: $${serverAlert.triggeredPrice} ${conditionSign} Ціль: $${serverAlert.targetPrice}\n${serverAlert.note || serverAlert.formationName || 'Ціль досягнута!'}`,
+          const sym = record.symbol ? `#${record.symbol}` : '';
+          const title = record.title || 'Нове сповіщення';
+          const body = `${record.description || ''}${record.price ? `\nЦіна: $${record.price}` : ''}`;
+          const tag = record.eventId || record.id || `notif_${Date.now()}`;
+
+          const notif = new Notification(`🚨 SIGNALHOOK ${sym}: ${title}`, {
+            body,
             icon: '/favicon.ico',
+            tag, // Prevents duplicate system notifications for the same event
           });
+
+          notif.onclick = () => {
+            window.focus();
+            try {
+              notif.close();
+            } catch {}
+          };
         } catch {
-          // ignore
+          // Graceful fallback if notification creation throws in restricted environments
         }
       }
     }
   }, []);
+
+  const handleServerAlertTriggered = useCallback(
+    (serverAlert: PriceAlert) => {
+      const conditionSign = serverAlert.condition === 'gte' ? '≥' : '≤';
+      handleUnifiedNotification({
+        id: `alert_evt_${serverAlert.id}_${Date.now()}`,
+        eventId: serverAlert.id,
+        source: 'PRICE_ALERT',
+        eventType: 'PRICE_ALERT',
+        symbol: serverAlert.symbol,
+        exchange: serverAlert.exchange,
+        marketType: serverAlert.marketType,
+        price: serverAlert.triggeredPrice || serverAlert.targetPrice,
+        title: `Цінове сповіщення: ${serverAlert.symbol}`,
+        description: `Ціна: $${serverAlert.triggeredPrice || serverAlert.targetPrice} ${conditionSign} $${serverAlert.targetPrice}\n${serverAlert.note || serverAlert.formationName || 'Ціль досягнута!'}`,
+        metadata: {
+          targetPrice: serverAlert.targetPrice,
+          condition: serverAlert.condition,
+          levelType: serverAlert.levelType,
+        },
+      });
+    },
+    [handleUnifiedNotification]
+  );
 
   // Fetch notification history from server & Firestore
   const fetchHistory = useCallback(async () => {
@@ -172,7 +238,12 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     } finally {
       setLoadingHistory(false);
     }
-  }, [user]);
+  }, [user?.uid]);
+
+  const fetchHistoryRef = useRef(fetchHistory);
+  fetchHistoryRef.current = fetchHistory;
+  const handleServerAlertTriggeredRef = useRef(handleServerAlertTriggered);
+  handleServerAlertTriggeredRef.current = handleServerAlertTriggered;
 
   // Sync with Firestore or local storage depending on whether user is Firebase or local
   useEffect(() => {
@@ -279,18 +350,20 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     fetchHistory();
 
     return () => unsubscribe();
-  }, [user, profile?.telegramBotToken, profile?.telegramChatId, fetchHistory]);
+  }, [user?.uid, profile?.telegramBotToken, profile?.telegramChatId]);
 
   // Active client-side CRON polling to sync with server alerts monitor every 5 seconds
   useEffect(() => {
-    if (!user) return;
+    if (!user?.uid) return;
 
     const pollSync = async () => {
       try {
-        const isLocal = Boolean((user as any).isLocalUser);
-        let currentAlertsList = alerts;
+        const currentUser = userRef.current;
+        if (!currentUser) return;
+        const isLocal = Boolean((currentUser as any).isLocalUser);
+        let currentAlertsList = alertsRef.current;
         if (isLocal) {
-          const saved = localStorage.getItem(`signalhook_user_alerts_${user.uid}`);
+          const saved = localStorage.getItem(`signalhook_user_alerts_${currentUser.uid}`);
           if (saved) {
             try { currentAlertsList = JSON.parse(saved); } catch {}
           }
@@ -300,9 +373,9 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            userId: user.uid,
-            telegramBotToken: profile?.telegramBotToken,
-            telegramChatId: profile?.telegramChatId,
+            userId: currentUser.uid,
+            telegramBotToken: profileRef.current?.telegramBotToken,
+            telegramChatId: profileRef.current?.telegramChatId,
             alerts: currentAlertsList,
           }),
         });
@@ -316,10 +389,10 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             const localMatch = currentAlertsList.find((a) => a.id === serverAlert.id);
             if (localMatch && serverAlert.triggered && !localMatch.triggered) {
               hasNewlyTriggered = true;
-              handleServerAlertTriggered(serverAlert);
+              handleServerAlertTriggeredRef.current(serverAlert);
 
               if (!isLocal) {
-                const docRef = doc(db, 'users', user.uid, 'alerts', serverAlert.id);
+                const docRef = doc(db, 'users', currentUser.uid, 'alerts', serverAlert.id);
                 updateDoc(
                   docRef,
                   cleanForFirestore({
@@ -334,14 +407,17 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           });
 
           if (isLocal) {
-            setAlerts(data.alerts);
+            setAlerts((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(data.alerts)) return prev;
+              return data.alerts;
+            });
             try {
-              localStorage.setItem(`signalhook_user_alerts_${user.uid}`, JSON.stringify(data.alerts));
+              localStorage.setItem(`signalhook_user_alerts_${currentUser.uid}`, JSON.stringify(data.alerts));
             } catch {}
           }
 
           if (hasNewlyTriggered) {
-            fetchHistory();
+            fetchHistoryRef.current();
           }
         }
       } catch {
@@ -351,7 +427,42 @@ export const AlertsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const interval = setInterval(pollSync, 5000);
     return () => clearInterval(interval);
-  }, [user, profile?.telegramBotToken, profile?.telegramChatId, alerts, handleServerAlertTriggered, fetchHistory]);
+  }, [user?.uid]);
+
+  // Unified Notifications Poll Loop (#8 & #9)
+  // Regularly pulls real-time alerts (BOS, CHoCH, OI, Densities, Setups, Third Touch, Price Alerts)
+  useEffect(() => {
+    const uid = user?.uid || 'guest';
+
+    const pollNotifications = async () => {
+      try {
+        const since = lastPollTimeRef.current;
+        const res = await fetch(`/api/notifications/poll?userId=${encodeURIComponent(uid)}&since=${since}`);
+        if (!res.ok) return;
+
+        const data = await res.json();
+        if (data.success && Array.isArray(data.notifications) && data.notifications.length > 0) {
+          let hasNew = false;
+          for (const notif of data.notifications) {
+            if (!seenNotificationIdsRef.current.has(notif.id)) {
+              seenNotificationIdsRef.current.add(notif.id);
+              hasNew = true;
+              handleUnifiedNotification(notif);
+            }
+          }
+          if (hasNew) {
+            lastPollTimeRef.current = Date.now();
+            fetchHistoryRef.current();
+          }
+        }
+      } catch {
+        // network silent fail
+      }
+    };
+
+    const interval = setInterval(pollNotifications, 3500);
+    return () => clearInterval(interval);
+  }, [user?.uid, handleUnifiedNotification]);
 
   // Migrate local alerts to user profile on first login if any
   useEffect(() => {

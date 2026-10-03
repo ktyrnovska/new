@@ -2,6 +2,7 @@ import { checkAlertsOnce, loadAlerts, getAllAlerts } from './alertService';
 import { checkCoinSurveillance, getAllActiveSurveillanceCoins, loadSurveillanceStore, saveSurveillanceStore } from './surveillanceService';
 import { runScreenerScan } from './marketService';
 import { sendTelegramMessage, getEffectiveTelegramConfig } from './telegramService';
+import { surveillanceManager } from './surveillance/surveillanceManager';
 
 export interface CronJobStatus {
   id: string;
@@ -74,6 +75,11 @@ class CronManager {
 
   public init() {
     console.log('[CRON] Initializing unified background notification cron system...');
+    try {
+      surveillanceManager.start();
+    } catch (e) {
+      console.error('[CRON] Error starting surveillanceManager:', e);
+    }
     this.startPriceAlertsCron();
     this.startSurveillanceCron();
     this.startScreenerCron();
@@ -121,19 +127,38 @@ class CronManager {
       try {
         const activeItems = getAllActiveSurveillanceCoins();
         if (activeItems.length > 0) {
-          const store = loadSurveillanceStore();
           for (const { userId, coin } of activeItems) {
             try {
-              const { coin: updated } = await checkCoinSurveillance(coin);
+              // 1. Fresh check: ensure user has not paused or removed the coin while batch is executing
+              const store = loadSurveillanceStore();
               const userCoins = store[userId] || [];
-              const idx = userCoins.findIndex((c) => c.id === coin.id);
+              const currentCoin = userCoins.find((c) => c.id === coin.id);
+              if (!currentCoin || !currentCoin.isActive) {
+                // User paused or removed coin - respect user's explicit state immediately
+                continue;
+              }
+
+              // 2. Perform surveillance calculation (levels, momentum, golden pocket, channel, etc.)
+              // #1 & #6: Cron surveillance only checks candle close events and strictly enforces cooldowns
+              const { coin: updated } = await checkCoinSurveillance(currentCoin, { forceCheck: false, forceNotify: false });
+
+              // 3. Atomically write back state without ever altering or resetting isActive
+              const freshStore = loadSurveillanceStore();
+              const freshUserCoins = freshStore[userId] || [];
+              const idx = freshUserCoins.findIndex((c) => c.id === coin.id);
               if (idx !== -1) {
-                userCoins[idx] = updated;
-                store[userId] = userCoins;
-                saveSurveillanceStore(store);
+                // CRITICAL: Server surveillance NEVER disables itself!
+                // Only user manual action (pause button / delete) can alter isActive.
+                freshUserCoins[idx] = {
+                  ...updated,
+                  isActive: freshUserCoins[idx].isActive, // Guarantee preserving user's current pause/active state
+                };
+                freshStore[userId] = freshUserCoins;
+                saveSurveillanceStore(freshStore);
               }
             } catch (coinErr) {
               console.error(`[CRON:surveillance] Error on ${coin.symbol}:`, coinErr);
+              // Coin remains active for next scan iteration despite transient network/API issues
             }
           }
         }

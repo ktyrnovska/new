@@ -676,33 +676,35 @@ export const FormationDetailsModal: React.FC<FormationDetailsModalProps> = ({
               />
 
               {loadingKlines ? (
-                <div className="w-full h-[220px] xs:h-[260px] sm:h-[300px] md:h-[350px] lg:h-[390px] xl:h-[430px] rounded-xl border border-slate-800 bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-2">
+                <div className="w-[300px] h-[300px] rounded-xl border border-slate-800 bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-2">
                   <RefreshCw className="w-6 h-6 animate-spin text-cyan-400" />
                   <span className="text-xs">Завантаження свічок з біржі...</span>
                 </div>
               ) : (
-                <TradingViewChart
-                  klines={klines}
-                  formation={formation}
-                  symbol={`${coin.symbol}`}
-                  timeframe={timeframe}
-                  exchange={coin.exchange}
-                  marketType={coin.marketType}
-                  historyLimit={historyLimit}
-                  onHistoryLimitChange={setHistoryLimit}
-                  onTimeframeChange={setTimeframe}
-                  onLivePriceUpdate={setLivePrice}
-                  hideHeaderLiveIndicator={true}
-                  hideHeaderFormationBadge={true}
-                  hideSymbolAndPrice={true}
-                  onLiveStatusChange={setLiveStatus}
-                  onOpenFullscreen={() => setIsFullscreenChartOpen(true)}
-                  onAddToArchive={handleSaveToArchive}
-                  isArchived={alreadyArchived}
-                  isSavingArchive={isSavingArchive}
-                  customMarkers={archivedItem?.markers}
-                  savedChartParams={archivedItem?.chartParams}
-                />
+                <div className="w-[300px] h-[300px] rounded-xl border border-slate-800 bg-slate-950 overflow-hidden shadow-lg">
+                  <TradingViewChart
+                    klines={klines}
+                    formation={formation}
+                    symbol={`${coin.symbol}`}
+                    timeframe={timeframe}
+                    exchange={coin.exchange}
+                    marketType={coin.marketType}
+                    historyLimit={historyLimit}
+                    onHistoryLimitChange={setHistoryLimit}
+                    onTimeframeChange={setTimeframe}
+                    onLivePriceUpdate={setLivePrice}
+                    hideHeaderLiveIndicator={true}
+                    hideHeaderFormationBadge={true}
+                    hideSymbolAndPrice={true}
+                    onLiveStatusChange={setLiveStatus}
+                    onOpenFullscreen={() => setIsFullscreenChartOpen(true)}
+                    onAddToArchive={handleSaveToArchive}
+                    isArchived={alreadyArchived}
+                    isSavingArchive={isSavingArchive}
+                    customMarkers={archivedItem?.markers}
+                    savedChartParams={archivedItem?.chartParams}
+                  />
+                </div>
               )}
 
               {/* Custom Price Alert Section Below Chart */}
