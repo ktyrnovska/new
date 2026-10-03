@@ -63,3 +63,18 @@ export function validateSetupAlertsMath(setup: {
 
   return { valid: true, entry, target, stop };
 }
+
+/**
+ * Validates setup geometry (#13)
+ * LONG: STOP < ENTRY < TARGET
+ * SHORT: TARGET < ENTRY < STOP
+ */
+export function validateSetupGeometry(setup: {
+  direction: 'LONG' | 'SHORT';
+  preferredEntry?: number;
+  entryZone?: { low: number; high: number };
+  targetPrice: number;
+  invalidationPrice: number;
+}): SetupAlertsValidationResult {
+  return validateSetupAlertsMath(setup);
+}

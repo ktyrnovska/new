@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { ExchangeId, MarketType } from '../../src/types';
+import { TradeClassificationService } from './tradeClassificationService';
 import { OrderBookStatus } from './types';
 
 export interface RawTradeEvent {
@@ -230,16 +231,20 @@ export class ExchangeStreamClient extends EventEmitter {
       const price = parseFloat(payload.p);
       const quantity = parseFloat(payload.q);
       const isBuyerMaker = Boolean(payload.m);
-      // If buyer is maker, taker is seller -> aggressive SELL. If buyer is taker -> aggressive BUY.
-      const side: 'BUY' | 'SELL' = isBuyerMaker ? 'SELL' : 'BUY';
 
       if (!isNaN(price) && price > 0 && !isNaN(quantity) && quantity > 0) {
-        const tradeEvent: RawTradeEvent = {
+        const classified = TradeClassificationService.classifyBinanceTrade(
           price,
           quantity,
-          side,
-          time: payload.T || payload.E || Date.now(),
           isBuyerMaker,
+          payload.T || payload.E || Date.now()
+        );
+        const tradeEvent: RawTradeEvent = {
+          price: classified.price,
+          quantity: classified.quantity,
+          side: classified.side,
+          time: classified.time,
+          isBuyerMaker: classified.isBuyerMaker ?? false,
         };
         this.emit('trade', tradeEvent);
       }
@@ -296,14 +301,19 @@ export class ExchangeStreamClient extends EventEmitter {
         if (!t) continue;
         const price = parseFloat(t.p);
         const quantity = parseFloat(t.v);
-        const side: 'BUY' | 'SELL' = t.S?.toUpperCase() === 'BUY' ? 'BUY' : 'SELL';
         if (!isNaN(price) && price > 0 && !isNaN(quantity) && quantity > 0) {
-          this.emit('trade', {
+          const classified = TradeClassificationService.classifyBybitTrade(
             price,
             quantity,
-            side,
-            time: t.T || msg.ts || Date.now(),
-            isBuyerMaker: side === 'SELL',
+            t.S || 'Buy',
+            t.T || msg.ts || Date.now()
+          );
+          this.emit('trade', {
+            price: classified.price,
+            quantity: classified.quantity,
+            side: classified.side,
+            time: classified.time,
+            isBuyerMaker: classified.isBuyerMaker,
           } as RawTradeEvent);
         }
       }

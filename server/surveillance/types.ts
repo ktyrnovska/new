@@ -2,22 +2,6 @@ import { ExchangeId, MarketType, Timeframe } from '../../src/types';
 
 export type OrderBookStatus = 'CONNECTING' | 'SYNCING' | 'LIVE' | 'STALE' | 'RESYNCING' | 'ERROR';
 
-export type DataHealthStatus = 'LIVE' | 'SYNCING' | 'CONNECTING' | 'STALE' | 'ERROR' | 'DEGRADED';
-
-export interface DataHealth {
-  status: DataHealthStatus;
-  priceFresh: boolean;
-  orderbookFresh: boolean;
-  tradesFresh: boolean;
-  oiFresh: boolean;
-  candlesFresh: boolean;
-  latencyMs: number;
-  lastPriceUpdate: number;
-  lastOrderbookUpdate: number;
-  lastTradeUpdate: number;
-  lastOIUpdate: number;
-}
-
 export interface OrderBookLevel {
   price: number;
   quantity: number;
@@ -39,17 +23,9 @@ export interface OrderBookState {
   timestamp: number;
   status: OrderBookStatus;
   lastReceivedAt: number;
+  dataValid?: boolean;
+  sequenceGap?: boolean;
 }
-
-export type DensityClassification =
-  | 'NEW'
-  | 'STANDARD'
-  | 'PERSISTENT'
-  | 'STRONG'
-  | 'REMOVED'
-  | 'POSSIBLE_SPOOF'
-  | 'ABSORBED'
-  | 'REACTED';
 
 export interface DensityItem {
   id: string;
@@ -64,14 +40,17 @@ export interface DensityItem {
   maxSizeUsd: number;
   averageSizeUsd: number;
   persistenceRatio: number;
-  classification: DensityClassification;
+  classification: 'PERSISTENT_LIQUIDITY' | 'TRANSIENT_LIQUIDITY' | 'POSSIBLE_SPOOF' | 'STANDARD';
+  qualityScore?: number;
+  persistenceSamples?: number;
+  cancellationRate?: number;
+  replenishmentRate?: number;
+  lastSizeChangeAt?: number;
   historicalReaction?: {
-    reactionRate: number;
-    averageReactionPct: number;
-    medianReactionPct: number;
-    maxReactionPct: number;
+    median5mPct: number;
+    median15mPct: number;
+    median1hPct: number;
     sampleCount: number;
-    failureRate: number;
   };
 }
 
@@ -114,18 +93,10 @@ export interface LevelZone {
   zoneHigh: number;
   zoneCenter: number;
   touches: number;
-  confirmedTouches: number;
-  reactions: number;
   strongReactions: number;
   weakReactions: number;
-  failedBreaks: number;
-  breakoutCount: number;
-  rejectionCount: number;
   averageReactionPct: number;
-  medianReactionPct: number;
   maxReactionPct: number;
-  reactionRate: number;
-  failureRate: number;
   strengthScore: number; // 0–100
   firstSeen: number;
   lastTouchTime: number;
@@ -136,9 +107,6 @@ export type ThirdTouchState =
   | 'NOT_EXPECTED'
   | 'APPROACHING'
   | 'ACTIVE'
-  | 'CONFIRMED'
-  | 'REJECTED'
-  | 'BROKEN'
   | 'REACTION'
   | 'BREAKOUT'
   | 'FAILED';
@@ -161,6 +129,7 @@ export interface ThirdTouchTracker {
 }
 
 export interface DetectedPattern {
+  id?: string;
   name: string;
   type:
     | 'Double Top'
@@ -171,17 +140,11 @@ export interface DetectedPattern {
     | 'Descending Triangle'
     | 'Symmetrical Triangle'
     | 'Range'
-    | 'Rectangle'
     | 'Channel'
     | 'Flag'
     | 'Pennant'
     | 'Wedge'
-    | 'Head & Shoulders'
-    | 'Inverse Head & Shoulders'
-    | 'Breakout'
-    | 'Breakout Retest'
-    | 'Compression'
-    | 'Liquidity Sweep';
+    | 'Compression';
   bias: 'bullish' | 'bearish' | 'neutral';
   score: number; // 0–100
   upperBoundary: number;
@@ -191,21 +154,19 @@ export interface DetectedPattern {
   compression: boolean;
   timeframe: Timeframe;
   status: 'FORMING' | 'READY' | 'BROKEN' | 'INVALIDATED';
-  invalidationLevel?: number;
-  targetLevel?: number;
 }
 
 export interface TradeFlowSnapshot {
   aggressiveBuyUsd: number;
   aggressiveSellUsd: number;
-  deltaUsd: number;
   imbalanceRatio: number; // buy / sell
   largeTradeCount: number;
   totalTradeCount: number;
   averageTradeSizeUsd: number;
-  isAbsorption: boolean;
-  absorptionType: 'SELLER_ABSORPTION' | 'BUYER_ABSORPTION' | 'NONE';
   recentTradesWindowMs: number;
+  deltaUsd?: number;
+  deltaZScore?: number;
+  deltaAcceleration?: number;
 }
 
 export interface OISnapshot {
@@ -218,7 +179,6 @@ export interface OISnapshot {
   change4hPct: number;
   regime: 'PRICE_UP_OI_UP' | 'PRICE_UP_OI_DOWN' | 'PRICE_DOWN_OI_UP' | 'PRICE_DOWN_OI_DOWN' | 'NEUTRAL';
   isAnomaly: boolean;
-  velocity: number; // rate of change
 }
 
 export interface BTCContextSnapshot {
@@ -227,10 +187,10 @@ export interface BTCContextSnapshot {
   trend4h: 'Bullish' | 'Bearish' | 'Neutral';
   trend1h: 'Bullish' | 'Bearish' | 'Neutral';
   trend15m: 'Bullish' | 'Bearish' | 'Neutral';
-  btcDominance: number | null; // null if unavailable - NEVER hardcoded
-  btcDominanceRegime: 'rising' | 'falling' | 'range' | 'breakout' | 'UNAVAILABLE';
-  totalMarketCapUsd: number | null; // null if unavailable - NEVER hardcoded
-  totalMarketCapRegime: 'expansion' | 'contraction' | 'neutral' | 'UNAVAILABLE';
+  btcDominance: number;
+  btcDominanceRegime: 'rising' | 'falling' | 'range' | 'breakout';
+  totalMarketCapUsd: number;
+  totalMarketCapRegime: 'expansion' | 'contraction' | 'neutral';
   correlationAltBtc: number; // -1 to +1
   relativeStrength: 'STRONG' | 'NEUTRAL' | 'WEAK';
   lastUpdated: number;
@@ -240,39 +200,51 @@ export type SetupType =
   | 'SUPPORT_RETEST'
   | 'BREAKOUT_RETEST'
   | 'STRUCTURE_SHIFT'
-  | 'STRUCTURE_REVERSAL'
   | 'RESISTANCE_REJECTION'
-  | 'COMPRESSION_BREAKOUT'
   | 'LIQUIDITY_REACTION';
 
 export type SetupStage =
   | 'IDLE'
   | 'SUPPORT_APPROACH'
+  | 'APPROACHING'
   | 'IN_ZONE'
   | 'REACTION_WATCH'
+  | 'TRIGGERING'
   | 'CONFIRMING'
   | 'CONFIRMED'
+  | 'ENTRY_ACTIVE'
+  | 'TARGET_1'
+  | 'TARGET_2'
   | 'INVALIDATED'
+  | 'EXPIRED'
   | 'COMPLETED';
 
-export interface ConfluenceBreakdown {
-  htfStructure: number;
-  levelStrength: number;
-  reaction: number;
-  formation: number;
-  volume: number;
-  tradeFlow: number;
-  orderbook: number;
-  density: number;
-  oi: number;
-  funding: number;
-  btcContext: number;
-  correlation: number;
-  fibonacci: number;
-  compression: number;
-  thirdTouch: number;
-  session: number;
-  totalScore: number;
+
+export interface SetupConfluenceComponent {
+  score: number;
+  max: number;
+  status: 'STRONG' | 'GOOD' | 'WEAK' | 'MISSING' | 'CONFLICT';
+  evidence: string;
+}
+
+export interface SetupConfluenceBreakdown {
+  total: number;
+  grade: 'A+' | 'A' | 'B' | 'C' | 'D';
+  components: {
+    formation: SetupConfluenceComponent;
+    htf: SetupConfluenceComponent;
+    location: SetupConfluenceComponent;
+    trigger: SetupConfluenceComponent;
+    volume: SetupConfluenceComponent;
+    orderFlow: SetupConfluenceComponent;
+    orderBook: SetupConfluenceComponent;
+    oi: SetupConfluenceComponent;
+    marketContext: SetupConfluenceComponent;
+  };
+  independentConfirmations: number;
+  conflicts: string[];
+  missing: string[];
+  notes: string[];
 }
 
 export interface SetupInstance {
@@ -284,18 +256,14 @@ export interface SetupInstance {
   timeframe: Timeframe;
   stage: SetupStage;
   direction: 'LONG' | 'SHORT';
-  entryZone: { low: number; high: number; center: number };
-  optimalEntry: number;
+  entryZone: { low: number; high: number };
+  preferredEntry?: number;
+  confirmationEntry?: number;
+  aggressiveEntry?: number;
   invalidationPrice: number;
   targetPrice: number;
-  targets: {
-    tp1: number;
-    tp2: number;
-    tp3: number;
-  };
-  riskRewardRatio: number;
+  targets?: number[];
   confluenceScore: number; // 0–100
-  confluenceBreakdown: ConfluenceBreakdown;
   confirmations: string[];
   waitingFor: string;
   evidence: {
@@ -309,26 +277,28 @@ export interface SetupInstance {
   };
   createdAt: number;
   updatedAt: number;
-}
-
-export type MarketPhaseType =
-  | 'ACCUMULATION'
-  | 'RANGE'
-  | 'MARKUP'
-  | 'DISTRIBUTION'
-  | 'MARKDOWN'
-  | 'PULLBACK'
-  | 'BREAKOUT'
-  | 'RETEST'
-  | 'EXPANSION'
-  | 'CONTRACTION';
-
-export interface MarketPhaseState {
-  currentPhase: MarketPhaseType;
-  confidence: number; // 0–100
-  previousPhase: MarketPhaseType;
-  nextLikelyState: string;
-  reasoning: string;
+  confluenceBreakdown?: SetupConfluenceBreakdown;
+  entryQuality?: {
+    score: number;
+    formationScore?: number;
+    htfScore?: number;
+    levelScore?: number;
+    triggerScore?: number;
+    structureScore?: number;
+    volumeScore?: number;
+    flowScore?: number;
+    orderBookScore?: number;
+    oiScore?: number;
+    marketContextScore?: number;
+    riskReward: number;
+    hardGatesPassed: boolean;
+    independentConfirmations: number;
+    entryType: 'REVERSAL_RECLAIM' | 'BREAKOUT_RETEST' | 'BOS_RETEST' | 'LIQUIDITY_REACTION';
+    preferredEntry: number;
+    entryZone?: { low: number; high: number };
+    invalidation?: number;
+    targets?: number[];
+  };
 }
 
 export interface EngineAlertEvent {
@@ -338,37 +308,31 @@ export interface EngineAlertEvent {
   marketType: MarketType;
   type:
     | 'LEVEL_DETECTED'
-    | 'LEVEL_APPROACH'
     | 'THIRD_TOUCH_APPROACHING'
     | 'THIRD_TOUCH_ACTIVE'
-    | 'THIRD_TOUCH_CONFIRMED'
     | 'THIRD_TOUCH_REACTION'
     | 'FORMATION_DETECTED'
     | 'FORMATION_INVALIDATED'
     | 'BREAKOUT_REALTIME'
     | 'BREAKOUT_CONFIRMED'
-    | 'BREAKOUT_RETEST'
     | 'CHANNEL_BREAK'
     | 'SUPPORT_RETEST_WATCH'
     | 'SUPPORT_RETEST_CONFIRMED'
-    | 'RESISTANCE_REJECTION'
+    | 'RESISTANCE_RETEST_CONFIRMED'
+    | 'FORMATION_SETUP_CONFIRMED'
+    | 'BREAKOUT_RETEST'
     | 'STRUCTURE_SHIFT'
     | 'BOS'
     | 'CHoCH'
     | 'DENSITY_APPEARED'
     | 'DENSITY_PERSISTENT'
     | 'DENSITY_REMOVED'
-    | 'POSSIBLE_SPOOF'
-    | 'ABSORPTION'
     | 'OI_ANOMALY'
     | 'VOLUME_ANOMALY'
-    | 'TRADE_FLOW_ANOMALY'
     | 'IMPULSE'
     | 'SESSION_CHANGED'
     | 'NEWS'
     | 'MARKET_CONTEXT_CHANGED'
-    | 'DATA_STALE'
-    | 'DATA_RECOVERED'
     | 'SUPPORT_RESISTANCE_FLIP'
     | 'PRESSURE_TO_HIGH'
     | 'PRESSURE_TO_LOW';

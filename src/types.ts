@@ -256,7 +256,7 @@ export interface PriceAlert {
   telegramBotToken?: string;
   telegramChatId?: string;
   // State machine & Retry tracking (#3 & #12)
-  triggerStatus?: 'ACTIVE' | 'TRIGGERING' | 'TRIGGERED' | 'RETRY' | 'FAILED';
+  triggerStatus?: 'ACTIVE' | 'TRIGGERING' | 'TRIGGERED' | 'RETRY' | 'FAILED' | 'CANCELLED';
   retryCount?: number;
   lastAttemptAt?: number;
   nextRetryAt?: number;
@@ -704,7 +704,7 @@ export interface MarketSentimentData {
 
 export type SurveillanceEventType = 'structure' | 'level' | 'momentum' | 'risk';
 
-export type TriggerModeType = 'bar_close' | 'realtime' | 'bar_close_15m' | 'bar_close_1h';
+export type TriggerModeType = 'bar_close' | 'realtime' | 'bar_close_15m' | 'bar_close_1h' | 'bar_close_4h';
 
 export interface SurveillanceConfig {
   timeframe: Timeframe;

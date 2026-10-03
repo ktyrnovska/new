@@ -220,8 +220,8 @@ export class LevelsAndFormationsEngine {
     return activeTrackers;
   }
 
-  public detectFormations(candles1h: Kline[], currentPrice: number): DetectedPattern[] {
-    const canonical = detectCanonicalFormations(candles1h, `${this.levelZones.length ? 'SURVEILLANCE' : 'SURVEILLANCE'}`);
+  public detectFormations(candles1h: Kline[], currentPrice: number, symbol = 'SURVEILLANCE'): DetectedPattern[] {
+    const canonical = detectCanonicalFormations(candles1h, symbol);
     const mapType = (f: DetectedFormation): DetectedPattern['type'] => {
       const n = f.nameEn.toLowerCase();
       if (n.includes('double bottom')) return 'Double Bottom';
@@ -237,6 +237,7 @@ export class LevelsAndFormationsEngine {
       return 'Range';
     };
     return canonical.map((f) => ({
+      id: f.id,
       name: f.name,
       type: mapType(f),
       bias: f.bias,

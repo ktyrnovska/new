@@ -295,16 +295,38 @@ export class NotificationRouter {
         }
       }
 
-      // Trigger mode check
-      if (event.triggerMode === 'realtime') {
+      const evUpper = event.eventType.toUpperCase();
+
+      // Trigger mode & Event Policy check (#4)
+      const isLiveMarketData =
+        event.source === 'ORDERBOOK' ||
+        event.source === 'TRADING_FLOW' ||
+        evUpper.startsWith('DENSITY');
+
+      if (!isLiveMarketData && event.source !== 'PRICE_ALERT') {
         const modes = coin.config?.triggerModes || (coin.config?.triggerMode ? [coin.config.triggerMode] : ['bar_close']);
-        if (!modes.includes('realtime')) {
-          return { canDispatch: false, reason: 'realtime_mode_disabled', eventKey };
+        const tf = event.timeframe || '15m';
+
+        if (event.triggerMode === 'realtime') {
+          if (!modes.includes('realtime')) {
+            return { canDispatch: false, reason: 'TRIGGER_MODE_DISABLED', eventKey };
+          }
+        } else if (tf === '4h' || tf === '1d') {
+          if (!modes.includes('bar_close') && !modes.includes('bar_close_4h') && !modes.includes('realtime')) {
+            return { canDispatch: false, reason: 'TRIGGER_MODE_DISABLED', eventKey };
+          }
+        } else if (tf === '1h') {
+          if (!modes.includes('bar_close_1h') && !modes.includes('bar_close') && !modes.includes('realtime')) {
+            return { canDispatch: false, reason: 'TRIGGER_MODE_DISABLED', eventKey };
+          }
+        } else if (tf === '15m' || tf === '5m') {
+          if (!modes.includes('bar_close_15m') && !modes.includes('bar_close') && !modes.includes('realtime')) {
+            return { canDispatch: false, reason: 'TRIGGER_MODE_DISABLED', eventKey };
+          }
         }
       }
 
       // Category-specific alert toggles
-      const evUpper = event.eventType.toUpperCase();
       if (evUpper === 'OI_ANOMALY' && coin.config?.oiAlerts === false) {
         return { canDispatch: false, reason: 'oi_alerts_disabled', eventKey };
       }
@@ -473,12 +495,35 @@ export class NotificationRouter {
     const eventKey = this.generateEventIdentity(event);
     const channels = event.channels || ['telegram', 'browser', 'internal'];
 
-    console.log(`[Trace:${traceId}] [DETECTED] #${event.symbol} event: ${event.eventType} on ${event.exchange.toUpperCase()} (user: ${event.userId || 'guest'})`);
+    const structuredLog = {
+      traceId,
+      eventId: eventKey,
+      userId: event.userId || 'guest',
+      symbol: event.symbol,
+      exchange: event.exchange,
+      marketType: event.marketType,
+      source: event.source,
+      eventType: event.eventType,
+      triggerMode: event.triggerMode,
+      eventIdentity: event.eventIdentity,
+      dedupKey: eventKey,
+      cooldownKey: eventKey,
+      telegramEnabled: event.coin?.config?.telegramEnabled ?? true,
+      threshold: event.metadata?.threshold,
+      analysisTimestamp: Date.now(),
+      dispatchStatus: 'DETECTED',
+      failureReason: undefined as string | undefined,
+    };
+
+    console.log(`[Trace:${traceId}] [DETECTED] #${event.symbol} (${event.eventType}) on ${event.exchange.toUpperCase()}`, JSON.stringify(structuredLog));
 
     const check = this.canDispatch(event);
     if (!check.canDispatch) {
+      structuredLog.dispatchStatus = check.reason || 'REJECTED';
+      structuredLog.failureReason = check.reason;
+      console.warn(`[Trace:${traceId}] [GATE_REJECT] #${event.symbol} rejected: ${check.reason}`, JSON.stringify(structuredLog));
+
       if (check.reason === 'deduplicated') {
-        console.log(`[Trace:${traceId}] [DEDUP] Duplicate event suppressed for ${eventKey}`);
         return {
           success: false,
           eventId: eventKey,
@@ -489,7 +534,6 @@ export class NotificationRouter {
         };
       }
       if (check.reason === 'cooldown_active') {
-        console.log(`[Trace:${traceId}] [COOLDOWN] Cooldown active for ${eventKey} (${check.remainingCooldownSeconds}s remaining)`);
         return {
           success: false,
           eventId: eventKey,

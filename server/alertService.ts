@@ -658,6 +658,7 @@ export async function checkAlertsOnce() {
     let updated = false;
 
     for (const alert of activeAlerts) {
+      if (alert.triggerStatus === 'CANCELLED' || !alert.isActive) continue;
       const key = `${alert.exchange}:${alert.marketType}:${alert.symbol}`;
       const currentPrice = priceMap.get(key);
       if (currentPrice === undefined) continue;
@@ -735,6 +736,23 @@ export async function checkAlertsOnce() {
           alert.triggeredAt = Date.now();
           alert.triggeredPrice = currentPrice;
           alert.lastError = undefined;
+
+          // #15: TP / SL mutual cancellation (OCO)
+          // If TARGET triggered -> cancel STOP. If STOP triggered -> cancel TARGET.
+          // ENTRY does NOT cancel TP/SL.
+          if (alert.setupId && alert.setupRole) {
+            const counterpartRole = alert.setupRole === 'TARGET' ? 'STOP' : alert.setupRole === 'STOP' ? 'TARGET' : null;
+            if (counterpartRole) {
+              for (const other of alerts) {
+                if (other.setupId === alert.setupId && other.setupRole === counterpartRole && other.isActive) {
+                  other.isActive = false;
+                  other.triggerStatus = 'CANCELLED';
+                  other.lastError = `Скасовано автоматично через спрацювання ${alert.setupRole}`;
+                  console.log(`[AlertService] ⚡ OCO Cancellation: alert #${other.id} (${counterpartRole}) cancelled due to ${alert.setupRole} execution on setup ${alert.setupId}`);
+                }
+              }
+            }
+          }
 
           // Record in Alert History
           addHistoryItem({

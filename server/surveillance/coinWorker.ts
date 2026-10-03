@@ -83,7 +83,12 @@ export class CoinWorker {
     private alertManager: StateMachineAndAlerts
   ) {
     this.streamClient = new ExchangeStreamClient(coin.symbol, coin.exchange, coin.marketType);
-    this.orderBookEngine = new OrderBookEngine(coin.symbol, coin.exchange, coin.marketType);
+    this.orderBookEngine = new OrderBookEngine(coin.symbol, coin.exchange, coin.marketType, {
+      mode: coin.config?.densityMode || 'AUTO',
+      manualThresholdUsd: coin.config?.manualDensityThresholdUsd || 500000,
+      minPersistenceSeconds: 15,
+      minDistancePct: 0.1,
+    });
     this.mtfEngine = new MultiTimeframeEngine();
     this.levelsEngine = new LevelsAndFormationsEngine();
     this.volumeOIEngine = new VolumeAndOIEngine();
@@ -105,11 +110,21 @@ export class CoinWorker {
       return;
     }
 
+    this.orderBookEngine.updateConfig({
+      mode: coin.config?.densityMode || 'AUTO',
+      manualThresholdUsd: coin.config?.manualDensityThresholdUsd || 500000,
+    });
+
     if (streamNeedsRestart) {
       console.log(`[CoinWorker ${coin.symbol}] Exchange/symbol/marketType changed. Reinitializing stream...`);
       this.streamClient.destroy();
       this.streamClient = new ExchangeStreamClient(coin.symbol, coin.exchange, coin.marketType);
-      this.orderBookEngine = new OrderBookEngine(coin.symbol, coin.exchange, coin.marketType);
+      this.orderBookEngine = new OrderBookEngine(coin.symbol, coin.exchange, coin.marketType, {
+        mode: coin.config?.densityMode || 'AUTO',
+        manualThresholdUsd: coin.config?.manualDensityThresholdUsd || 500000,
+        minPersistenceSeconds: 15,
+        minDistancePct: 0.1,
+      });
       this.setupStreamListeners();
       this.loadInitialHistory();
     }
@@ -167,7 +182,7 @@ export class CoinWorker {
 
     // 3. Depth Updates for Local Order Book & Densities (Fast Path)
     this.streamClient.on('depth', (delta: RawDepthDelta) => {
-      this.orderBookEngine.applyDepth(delta);
+      this.orderBookEngine.applyDepth(delta, this.volume24hUsd);
     });
 
     // 4. Stream status
@@ -337,7 +352,7 @@ export class CoinWorker {
     }
 
     // 4. Formations
-    this.patterns = this.levelsEngine.detectFormations(candles1h, price);
+    this.patterns = this.levelsEngine.detectFormations(candles1h, price, this.coin.symbol);
 
     // 5. Volume, RVOL, Trade Flow, OI
     const { rvol } = this.volumeOIEngine.calculateRVOL(candles15m);
@@ -439,6 +454,52 @@ export class CoinWorker {
           coin: this.coin,
         });
       }
+    }
+
+    // 6c. Replenished liquidity (#7)
+    const replenished = this.orderBookEngine.pollNewlyReplenishedDensities();
+    for (const d of replenished) {
+      const dKey = `${d.side}_${d.price}`;
+      notificationRouter.dispatch({
+        source: 'ORDERBOOK',
+        userId: this.coin.userId,
+        coinId: this.coin.id,
+        symbol: this.coin.symbol,
+        exchange: this.coin.exchange,
+        marketType: this.coin.marketType,
+        eventType: 'DENSITY_REPLENISHED',
+        eventIdentity: dKey,
+        direction: d.side === 'BID' ? 'BUY' : 'SELL',
+        title: `⚡ Підкріплення щільності ${d.side}: $${d.price}`,
+        description: `Збільшення об'єму до $${Math.round(d.notionalUsd).toLocaleString('en-US')}`,
+        price: d.price,
+        severity: 'IMPORTANT',
+        triggerMode: 'realtime',
+        coin: this.coin,
+      });
+    }
+
+    // 6d. Removed liquidity (#7)
+    const removed = this.orderBookEngine.pollNewlyRemovedDensities();
+    for (const d of removed) {
+      const dKey = `${d.side}_${d.price}`;
+      notificationRouter.dispatch({
+        source: 'ORDERBOOK',
+        userId: this.coin.userId,
+        coinId: this.coin.id,
+        symbol: this.coin.symbol,
+        exchange: this.coin.exchange,
+        marketType: this.coin.marketType,
+        eventType: 'DENSITY_REMOVED',
+        eventIdentity: dKey,
+        direction: d.side === 'BID' ? 'BUY' : 'SELL',
+        title: `Зняття щільності ${d.side}: $${d.price}`,
+        description: `Заявку $${Math.round(d.notionalUsd).toLocaleString('en-US')} було знято зі стакана`,
+        price: d.price,
+        severity: 'info',
+        triggerMode: 'realtime',
+        coin: this.coin,
+      });
     }
 
     // 7. Macro & BTC Context
