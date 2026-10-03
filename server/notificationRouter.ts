@@ -36,6 +36,7 @@ export interface NotificationEvent {
   triggerMode?: 'realtime' | 'bar_close' | 'bar_close_1h' | 'bar_close_15m' | 'manual';
   customCooldownMs?: number;
   forceNotify?: boolean;
+  telegramEnabled?: boolean;
 }
 
 export interface NotificationHistoryRecord {
@@ -493,7 +494,15 @@ export class NotificationRouter {
   public async dispatch(event: NotificationEvent): Promise<DispatchResult> {
     const traceId = Math.random().toString(36).substring(2, 8);
     const eventKey = this.generateEventIdentity(event);
-    const channels = event.channels || ['telegram', 'browser', 'internal'];
+    const channels = [...(event.channels || ['telegram', 'browser', 'internal'])];
+    const coinTgEnabled = event.coin?.config?.telegramEnabled ?? true;
+    const globalTgEnabled = event.telegramEnabled ?? true;
+    if (!coinTgEnabled || !globalTgEnabled) {
+      const idx = channels.indexOf('telegram');
+      if (idx !== -1) {
+        channels.splice(idx, 1);
+      }
+    }
 
     const structuredLog = {
       traceId,

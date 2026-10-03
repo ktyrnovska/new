@@ -138,10 +138,13 @@ export class CoinWorker {
     if (this.coin.config.telegramEnabled === false) return false;
 
     // 2. Realtime trigger mode check (#1 & #5):
-    // Realtime Telegram alerts from CoinWorker are ONLY dispatched if 'realtime' is active in triggerModes
-    const modes = this.coin.config.triggerModes ||
-      (this.coin.config.triggerMode ? [this.coin.config.triggerMode] : ['bar_close']);
-    if (!modes.includes('realtime')) return false;
+    // Density, Order Book, and Trade Flow do not depend on candle confirmation or realtime mode flag
+    const isDensityOrOrderBook = alertCategory === 'DENSITY' || alertCategory === 'ORDERBOOK' || alertCategory === 'TRADE_FLOW';
+    if (!isDensityOrOrderBook) {
+      const modes = this.coin.config.triggerModes ||
+        (this.coin.config.triggerMode ? [this.coin.config.triggerMode] : ['bar_close']);
+      if (!modes.includes('realtime')) return false;
+    }
 
     // 3. Category toggles check
     if (alertCategory === 'OI_ANOMALY' && this.coin.config.oiAlerts === false) return false;

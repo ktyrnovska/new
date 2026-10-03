@@ -28,17 +28,17 @@
         ]
       },
       "state": {
-        "currentPrice": 84609.9,
-        "change24h": 0.15,
+        "currentPrice": 84615.2,
+        "change24h": 0.16,
         "high1d": 87385.1,
         "low1d": 62484.2,
         "swingHigh4h": 87249.6,
         "swingLow4h": 83841.9,
-        "localHigh1h": 84725.04,
-        "localLow1h": 84422.01,
-        "localHigh15m": 84665.88,
-        "localLow15m": 84557.36,
-        "rangePositionPct": 72.5,
+        "localHigh1h": 84690.2,
+        "localLow1h": 84380.5,
+        "localHigh15m": 84624,
+        "localLow15m": 84501.5,
+        "rangePositionPct": 73,
         "resistance4h": 84901.6,
         "support4h": 83841.9,
         "nextZoneUp": 85431.45000000001,
@@ -46,10 +46,10 @@
         "fib618": 85143.6414,
         "fib786": 84571.14779999999,
         "structureTrend": "bullish",
-        "channelUpper": 85508,
-        "channelLower": 83888,
+        "channelUpper": 85472.9,
+        "channelLower": 83841.9,
         "momentumRecentPct": 0.06,
-        "lastCalculated": 1791027048592,
+        "lastCalculated": 1791027514051,
         "lastProcessedCandleTimes": {
           "15m": 0,
           "1h": 0,
@@ -322,7 +322,7 @@
           }
         ]
       },
-      "lastCheckedAt": "2026-10-03T11:30:48.592Z",
+      "lastCheckedAt": "2026-10-03T11:38:34.051Z",
       "lastNotifiedAt": "2026-10-03T10:30:11.749Z"
     }
   ],
@@ -337,7 +337,7 @@
       "marketType": "futures",
       "isActive": true,
       "createdAt": "2026-09-24T01:16:06.698Z",
-      "updatedAt": "2026-09-24T01:16:06.698Z",
+      "updatedAt": "2026-10-03T11:31:54.335Z",
       "config": {
         "timeframe": "4h",
         "triggerMode": "bar_close",
@@ -355,17 +355,17 @@
         ]
       },
       "state": {
-        "currentPrice": 84610,
-        "change24h": 0.15,
+        "currentPrice": 84615.2,
+        "change24h": 0.16,
         "high1d": 87385.1,
         "low1d": 62484.2,
         "swingHigh4h": 87249.6,
         "swingLow4h": 83841.9,
         "localHigh1h": 84690.2,
         "localLow1h": 84380.5,
-        "localHigh15m": 84665.88,
-        "localLow15m": 84557.36,
-        "rangePositionPct": 72.5,
+        "localHigh15m": 84624,
+        "localLow15m": 84501.5,
+        "rangePositionPct": 73,
         "resistance4h": 84901.6,
         "support4h": 83841.9,
         "nextZoneUp": 85431.45000000001,
@@ -376,7 +376,7 @@
         "channelUpper": 85472.9,
         "channelLower": 83841.9,
         "momentumRecentPct": 0.06,
-        "lastCalculated": 1791027054108,
+        "lastCalculated": 1791027514051,
         "lastProcessedCandleTimes": {
           "15m": 0,
           "1h": 0,
@@ -532,7 +532,7 @@
           }
         ]
       },
-      "lastCheckedAt": "2026-10-03T11:30:54.108Z",
+      "lastCheckedAt": "2026-10-03T11:38:34.051Z",
       "lastNotifiedAt": "2026-10-03T10:30:11.751Z"
     }
   ],
@@ -575,17 +575,17 @@
         "telegramEnabled": true
       },
       "state": {
-        "currentPrice": 84610,
-        "change24h": 0.15,
+        "currentPrice": 84615.2,
+        "change24h": 0.16,
         "high1d": 87385.1,
         "low1d": 62484.2,
         "swingHigh4h": 87249.6,
         "swingLow4h": 83841.9,
         "localHigh1h": 84690.2,
         "localLow1h": 84380.5,
-        "localHigh15m": 84665.88,
-        "localLow15m": 84557.36,
-        "rangePositionPct": 72.5,
+        "localHigh15m": 84624,
+        "localLow15m": 84501.5,
+        "rangePositionPct": 73,
         "resistance4h": 84901.6,
         "support4h": 83841.9,
         "nextZoneUp": 85431.45000000001,
@@ -596,7 +596,7 @@
         "channelUpper": 85472.9,
         "channelLower": 83841.9,
         "momentumRecentPct": 0.06,
-        "lastCalculated": 1791027054584,
+        "lastCalculated": 1791027514051,
         "lastProcessedCandleTimes": {
           "15m": 0,
           "1h": 0,
@@ -869,7 +869,7 @@
           }
         ]
       },
-      "lastCheckedAt": "2026-10-03T11:30:54.584Z",
+      "lastCheckedAt": "2026-10-03T11:38:34.051Z",
       "lastNotifiedAt": "2026-10-03T10:30:11.749Z"
     }
   ]
